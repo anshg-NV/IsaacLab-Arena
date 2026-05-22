@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import random
 import torch
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from isaaclab_arena.relations.bounding_box_helpers import has_heterogeneous_objects
@@ -58,7 +59,9 @@ class PooledObjectPlacer:
             raise ValueError(f"num_envs must be >= 1, got {self._num_envs}")
 
         self._objects = objects
-        self._placer = ObjectPlacer(params=placer_params)
+        # Pool construction ranks several candidate layouts per env and applies
+        # poses only when a sampled layout is used.
+        self._placer = ObjectPlacer(params=replace(placer_params, apply_positions_to_objects=False))
         self._pool_size = pool_size
         self._had_fallbacks = False
         self._layout_pools: dict[int, list[PlacementResult]] = {cur_env: [] for cur_env in range(self._num_envs)}
