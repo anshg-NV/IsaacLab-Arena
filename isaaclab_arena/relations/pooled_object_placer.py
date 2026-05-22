@@ -48,7 +48,6 @@ class PooledObjectPlacer:
         pool_size: int = 100,
         num_envs: int | None = None,
     ) -> None:
-        # 1. Validate params.
         if pool_size < 1:
             raise ValueError(f"pool_size must be >= 1, got {pool_size}")
         self._uses_env_specific_bboxes = has_heterogeneous_objects(objects)
@@ -58,7 +57,6 @@ class PooledObjectPlacer:
         if self._num_envs < 1:
             raise ValueError(f"num_envs must be >= 1, got {self._num_envs}")
 
-        # 2. Configure dependencies and per-env storage.
         self._objects = objects
         self._placer = ObjectPlacer(params=placer_params)
         self._pool_size = pool_size
@@ -66,7 +64,6 @@ class PooledObjectPlacer:
         self._layout_pools: dict[int, list[PlacementResult]] = {cur_env: [] for cur_env in range(self._num_envs)}
         self._layout_cursors: dict[int, int] = {cur_env: 0 for cur_env in range(self._num_envs)}
 
-        # 3. Solve the initial pool and assert every env has at least one layout.
         self._solve_and_store(pool_size)
         for cur_env, pool in self._layout_pools.items():
             if not pool:
