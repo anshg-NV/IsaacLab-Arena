@@ -94,6 +94,11 @@ class ArenaEnvBuilder:
             pool_size=pool_size,
             num_envs=num_envs,
         )
+        if placement_pool.had_fallbacks:
+            print(
+                "Warning: Relation placement pool accepted best-loss fallback layouts "
+                "that failed strict placement validation."
+            )
 
         if placer_params.resolve_on_reset:
             anchor_objects_set = set(get_anchor_objects(objects_with_relations))
@@ -129,13 +134,17 @@ class ArenaEnvBuilder:
         Only touches ``init_state.pos`` / ``init_state.rot`` — does NOT create
         per-object reset events (the placement event handles resets).
         """
+        if pool.requires_env_indexed_layouts:
+            print("Warning: Skipping static init_state seeding for env-indexed placement layouts.")
+            return
+
         layout = pool.sample_with_replacement(1)[0]
         for obj in objects:
             if obj in anchor_objects_set:
                 continue
             pos = layout.positions.get(obj)
             if pos is None:
-                continue
+                raise RuntimeError(f"Pool layout is missing object '{obj.name}'.")
             rotation_xyzw = get_rotation_xyzw(obj)
             obj.object_cfg.init_state.pos = pos
             obj.object_cfg.init_state.rot = rotation_xyzw
@@ -162,10 +171,9 @@ class ArenaEnvBuilder:
             for env_idx in range(num_envs):
                 pos = layouts[env_idx].positions.get(obj)
                 if pos is None:
-                    break
+                    raise RuntimeError(f"Placement layout for env {env_idx} is missing object '{obj.name}'.")
                 poses.append(Pose(position_xyz=pos, rotation_xyzw=rotation_xyzw))
-            else:
-                obj.set_initial_pose(PosePerEnv(poses=poses))
+            obj.set_initial_pose(PosePerEnv(poses=poses))
 
     def _modify_recorder_cfg_dataset_filename(self, recorder_cfg: RecorderManagerBaseCfg) -> RecorderManagerBaseCfg:
         """Modify the recorder dataset filename to include the timestamp and rank."""
