@@ -160,6 +160,21 @@ class OfficeTableBackground(LibraryBackground):
 
 
 @register_asset
+class HubbleTable(LibraryBackground):
+    """
+    Table in Hubble lab.
+    """
+
+    name = "hubble_table"
+    tags = ["background"]
+    usd_path = f"{ISAACLAB_NUCLEUS_DIR}/Mimic/nut_pour_task/nut_pour_assets/table.usd"
+    object_min_z = -0.05
+
+    def __init__(self):
+        super().__init__()
+
+
+@register_asset
 class LightwheelKitchenBackground(LibraryBackground):
     """
     Encapsulates the background scene for the Lightwheel Robocasa kitchen.
