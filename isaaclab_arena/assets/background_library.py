@@ -167,7 +167,7 @@ class HubbleTable(LibraryBackground):
 
     name = "hubble_table"
     tags = ["background"]
-    usd_path = f"{ISAACLAB_NUCLEUS_DIR}/Mimic/nut_pour_task/nut_pour_assets/table.usd"
+    usd_path = f"{__file__}/../../environments/hubble.usd"
     object_min_z = -0.05
 
     def __init__(self):
