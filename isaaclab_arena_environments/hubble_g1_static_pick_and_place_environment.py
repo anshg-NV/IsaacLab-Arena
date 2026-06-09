@@ -66,12 +66,12 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
 
         # Set all positions
         pick_up_object.set_initial_pose(PoseRange(
-            position_xyz_min=(0.05, 0.05, 0.755),
-            position_xyz_max=(0.25, 0.25, 0.755),
+            position_xyz_min=(0.10, 0.15, 0.775),
+            position_xyz_max=(0.20, 0.25, 0.775),
         ))
-        destination.set_initial_pose(Pose(position_xyz=(-0.15, 0.15, 0.755)))
+        destination.set_initial_pose(Pose(position_xyz=(-0.10, 0.25, 0.755)))
 
-        embodiment.set_initial_pose(Pose(position_xyz=(0.0, 0.8, 0.78), rotation_xyzw=(0.0, 0.0, -0.7071068, 0.7071068)))
+        embodiment.set_initial_pose(Pose(position_xyz=(0.0, 0.55, 0.78), rotation_xyzw=(0.0, 0.0, -0.7071068, 0.7071068)))
         embodiment.set_joint_initial_pos(G1_STATIC_OPEN_ARM_JOINT_POS)
 
         task_description = f"Pick up the {args_cli.object.replace("_", " ")} from the table and place it onto the {args_cli.destination.replace("_", " ")}."
