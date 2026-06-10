@@ -15,6 +15,41 @@ if TYPE_CHECKING:
     from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
 
 
+# Datagen stuff copied from galileo_g1_locomanip_pick_and_place_environment.py
+_LEGACY_DATAGEN_NAME = "locomanip_pick_and_place_D0"
+
+
+def _is_legacy_pair(pick_up_object_name: str, destination_name: str) -> bool:
+    return pick_up_object_name == "apple_01_objaverse_robolab" and destination_name == "clay_plates_hot3d_robolab"
+
+
+def _apply_legacy_datagen_name_override(
+    env_cfg: Any,
+    pick_up_object_name: str,
+    destination_name: str,
+) -> Any:
+    """Rewrite the Mimic ``datagen_config.name`` to the legacy value for the v0.2 workflow.
+
+    Only applies to Mimic configs (where ``datagen_config`` exists) and only to the exact
+    ``(apple_01_objaverse_robolab, clay_plates_hot3d_robolab)`` pair that was SQA'd against this datagen key. All other
+    pairs keep the templated name produced by ``G1PickAndPlaceMimicEnvCfg``.
+    """
+    if not _is_legacy_pair(pick_up_object_name, destination_name):
+        return env_cfg
+
+    datagen_config = getattr(env_cfg, "datagen_config", None)
+    if datagen_config is None:
+        return env_cfg
+
+    print(
+        f"Overriding Mimic datagen_config.name from {datagen_config.name} to the legacy {_LEGACY_DATAGEN_NAME}"
+        "This preserves identical behavior with existing Mimic datasets"
+        "Remove this in the future when checkpoints are retrained."
+    )
+    datagen_config.name = _LEGACY_DATAGEN_NAME
+    return env_cfg
+
+
 @register_environment
 class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
     """G1 (WBC-balanced, no nav) pick-and-place on a table.
@@ -28,7 +63,7 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
     def get_env(self, args_cli: argparse.Namespace) -> IsaacLabArenaEnvironment:
         from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
         from isaaclab_arena.scene.scene import Scene
-        from isaaclab_arena.tasks.pick_and_place_task import PickAndPlaceTask
+        from isaaclab_arena.tasks.hubble_pick_and_place import HubblePickAndPlaceMimicEnvCfg, HubblePickAndPlaceTask
         from isaaclab_arena.utils.pose import Pose, PoseRange
         from isaaclab_arena_environments.mdp.galileo_g1_static_pick_and_place.robot_configs import (
             G1_STATIC_FINGER_DYNAMIC_FRICTION,
@@ -76,9 +111,23 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
 
         task_description = f"Pick up the {args_cli.object.replace("_", " ")} from the table and place it onto the {args_cli.destination.replace("_", " ")}."
 
+        def env_cfg_callback(env_cfg):
+            return _apply_legacy_datagen_name_override(
+                env_cfg,
+                pick_up_object_name=pick_up_object.name,
+                destination_name=destination.name,
+            )
+
+        def _build_hubble_pick_and_place_mimic_cfg(arm_mode):
+            return HubblePickAndPlaceMimicEnvCfg(
+                pick_up_object_name=pick_up_object.name,
+                destination_location_name=destination.name,
+                arm_mode=arm_mode,
+            )
+
         scene = Scene(assets=assets)
 
-        task = PickAndPlaceTask(
+        task = HubblePickAndPlaceTask(
             pick_up_object=pick_up_object,
             destination_location=destination,
             background_scene=background,
@@ -87,6 +136,7 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
             # Mirror the locomanip env's success thresholds so metrics are comparable.
             force_threshold=0.5,
             velocity_threshold=0.1,
+            mimic_env_cfg_factory=_build_hubble_pick_and_place_mimic_cfg,
         )
 
         isaaclab_arena_environment = IsaacLabArenaEnvironment(
@@ -95,6 +145,7 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
             scene=scene,
             task=task,
             teleop_device=teleop_device,
+            env_cfg_callback=env_cfg_callback,
         )
 
         return isaaclab_arena_environment
