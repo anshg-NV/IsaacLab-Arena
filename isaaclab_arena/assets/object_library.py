@@ -223,6 +223,27 @@ class OfficeTable(LibraryObject):
 
 
 @register_asset
+class HubbleTable(LibraryObject):
+    """
+    Table in Hubble lab.
+    """
+
+    name = "hubble_table"
+    tags = ["object"]
+    usd_path = f"{__file__}/../../environments/hubble_table.usd"
+    object_min_z = -0.05
+
+    def __init__(
+        self,
+        instance_name: str | None = None,
+        prim_path: str | None = None,
+        initial_pose: Pose | None = None,
+        scale: tuple[float, float, float] | None = None,
+    ):
+        super().__init__(instance_name=instance_name, prim_path=prim_path, initial_pose=initial_pose, scale=scale)
+
+
+@register_asset
 class BlueSortingBin(LibraryObject):
     """
     A blue plastic sorting bin.

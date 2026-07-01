@@ -73,7 +73,8 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
             G1_STATIC_OPEN_ARM_JOINT_POS,
         )
 
-        background = self.asset_registry.get_asset_by_name("hubble_table")()
+        background = self.asset_registry.get_asset_by_name("hubble_background")()
+        table = self.asset_registry.get_asset_by_name("hubble_table")()
         pick_up_object = self.asset_registry.get_asset_by_name(args_cli.object)(scale=(0.009, 0.009, 0.009))
         destination = self.asset_registry.get_asset_by_name(args_cli.destination)(scale=(0.5, 0.5, 0.5))
 
@@ -81,7 +82,7 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
         ground_plane = self.asset_registry.get_asset_by_name("ground_plane")()
         light = self.asset_registry.get_asset_by_name("light")()
 
-        assets = [background, light, ground_plane, pick_up_object, destination]
+        assets = [background, table, light, ground_plane, pick_up_object, destination]
 
         embodiment = self.asset_registry.get_asset_by_name(args_cli.embodiment)(
             enable_cameras=args_cli.enable_cameras,

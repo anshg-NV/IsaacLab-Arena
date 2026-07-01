@@ -160,14 +160,14 @@ class OfficeTableBackground(LibraryBackground):
 
 
 @register_asset
-class HubbleTable(LibraryBackground):
+class HubbleBackground(LibraryBackground):
     """
-    Table in Hubble lab.
+    Background scene for Hubble lab.
     """
 
-    name = "hubble_table"
+    name = "hubble_background"
     tags = ["background"]
-    usd_path = f"{__file__}/../../environments/hubble_table.usd"
+    usd_path = f"{__file__}/../../environments/hubble_background.usd"
     object_min_z = -0.05
 
     def __init__(self):
