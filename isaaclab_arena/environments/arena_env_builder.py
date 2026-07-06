@@ -85,7 +85,7 @@ class ArenaEnvBuilder:
         objects_with_relations = self.arena_env.scene.get_objects_with_relations()
         # Relation-free background geometry is invisible to the relation graph, but placed objects
         # must still avoid it. This coarse path uses whole-asset obstacles; per-fixture culling
-        # (relations.background_colliders) is an explicit opt-in for large scenes like kitchens.
+        # (scene.background_colliders) is an explicit opt-in for large scenes like kitchens.
         collision_objects = self.arena_env.scene.get_collision_objects()
         self._placement_event_cfg = solve_and_apply_relation_placement(
             objects_with_relations,

@@ -131,7 +131,7 @@ class Scene:
 
         A Background is never returned: its bounding box spans the whole USD scene (including the
         very surfaces objects are placed on), so as a single obstacle it would reject every valid
-        layout. Per-fixture obstacles are opted in explicitly via relations.background_colliders.
+        layout. Per-fixture obstacles are opted in explicitly via scene.background_colliders.
 
         Returns:
             Qualifying collision objects, in scene-insertion order.
