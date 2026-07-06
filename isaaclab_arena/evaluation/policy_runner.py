@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import json
+
 import torch
 import tqdm
 from importlib import import_module
@@ -61,6 +63,46 @@ def is_distributed(args_cli: argparse.Namespace) -> bool:
     return (
         "cuda" in args_cli.device and hasattr(args_cli, "distributed") and args_cli.distributed and get_world_size() > 1
     )
+
+
+def _to_jsonable(value: Any) -> Any:
+    """Convert common metric and CLI values to JSON-serializable types."""
+    if isinstance(value, dict):
+        return {str(k): _to_jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(v) for v in value]
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu()
+        if value.numel() == 1:
+            return value.item()
+        return value.tolist()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def emit_final_metrics(metrics: dict[str, Any], args_cli: argparse.Namespace, local_rank: int, world_size: int) -> None:
+    """Emit final metrics as parseable JSON and append them to a JSONL file."""
+    record = _to_jsonable(
+        {
+            "rank": local_rank,
+            "world_size": world_size,
+            "checkpoint_path": getattr(args_cli, "robomimic_checkpoint"),
+            "metrics": metrics,
+        }
+    )
+    metrics_json = json.dumps(record, sort_keys=True)
+    print(f"POLICY_RUNNER_FINAL_METRICS_JSON: {metrics_json}", flush=True)
+
+    metrics_output_file = 'submodules/IsaacLab/logs/hubble/policy_runner_metrics.jsonl'
+    if metrics_output_file is None:
+        return
+
+    metrics_output_dir = os.path.dirname(metrics_output_file)
+    if metrics_output_dir:
+        os.makedirs(metrics_output_dir, exist_ok=True)
+    with open(metrics_output_file, "a", encoding="utf-8") as f:
+        f.write(metrics_json + "\n")
 
 
 def rollout_policy(
@@ -232,7 +274,9 @@ def main():
         metrics = rollout_policy(env, policy, num_steps, num_episodes)
 
         if metrics is not None:
-            print(f"[Rank {local_rank}/{world_size}] Metrics: {metrics_to_plain_python_types(metrics)}")
+            metrics_plain = metrics_to_plain_python_types(metrics)
+            print(f"[Rank {local_rank}/{world_size}] Metrics: {metrics_plain}")
+            emit_final_metrics(metrics_plain, args_cli, local_rank, world_size)
 
         # NOTE(huikang, 2025-12-30)Explicitly clean up the remote policy client / server.
         # Do NOT rely on a __del__ destructor in policy for this, since destructors are
