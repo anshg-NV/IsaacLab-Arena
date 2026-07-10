@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import argparse
 import copy
 import gymnasium as gym
 import torch
@@ -14,7 +13,7 @@ from gymnasium.spaces.dict import Dict as GymSpacesDict
 import robomimic.utils.file_utils as FileUtils
 
 from isaaclab_arena.assets.register import register_policy
-from isaaclab_arena.policy.policy_base import PolicyBase
+from isaaclab_arena.policy.policy_base import PolicyBase, PolicyCfg
 
 import leapp
 from leapp import annotate
@@ -43,26 +42,16 @@ _RGB_OBS_KEYS = ["robot_head_cam_rgb"]
 
 
 @dataclass
-class RobomimicStandPolicyArgs:
-    """
-    Configuration dataclass for RobomimicStandPolicy.
-    """
+class RobomimicStandPolicyCfg(PolicyCfg):
+    """Configuration for RobomimicStandPolicy."""
 
-    checkpoint_path: str
+    robomimic_checkpoint: str
     base_height: float = 0.78
     device: str = "cuda:0"
 
-    @classmethod
-    def from_cli_args(cls, args: argparse.Namespace) -> "RobomimicStandPolicyArgs":
-        return cls(
-            checkpoint_path=args.robomimic_checkpoint,
-            base_height=getattr(args, "base_height", 0.78),
-            device=getattr(args, "device", "cuda:0"),
-        )
-
 
 @register_policy
-class RobomimicStandPolicy(PolicyBase):
+class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
     """Agile WBC lower body (fixed stand height) + robomimic diffusion policy upper body.
 
     Lower body: zeros with base_height written to index -4 (navigate and torso commands stay zero).
@@ -72,13 +61,18 @@ class RobomimicStandPolicy(PolicyBase):
     """
 
     name = "robomimic_stand"
-    config_class = RobomimicStandPolicyArgs
 
-    def __init__(self, config: RobomimicStandPolicyArgs):
+    def __init__(self, config: RobomimicStandPolicyCfg):
+        """
+        Initialize StandPolicy.
+
+        Args:
+            config: Typed policy configuration.
+        """
         super().__init__(config)
         self._base_height = config.base_height
         self._device = config.device
-        self._checkpoint_path = config.checkpoint_path
+        self._checkpoint_path = config.robomimic_checkpoint
         self._obs_history: dict | None = None
         # LEAPP export runs once, on a step where the diffusion policy actually denoises.
         self._exported = False
@@ -176,42 +170,3 @@ class RobomimicStandPolicy(PolicyBase):
         if self._policy is not None:
             self._policy.start_episode()
         self._obs_history = None
-
-    @staticmethod
-    def add_args_to_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
-        """
-        Args:
-            parser: The argument parser to add arguments to
-
-        Returns:
-            The updated argument parser (unchanged)
-        """
-        parser.add_argument(
-            "--robomimic_checkpoint",
-            type=str,
-            required=True,
-            help="Path to the robomimic diffusion policy checkpoint (.pth).",
-        )
-        parser.add_argument(
-            "--base_height",
-            type=float,
-            default=0.78,
-            help="Target pelvis height in meters written into the WBC height command channel.",
-        )
-        return parser
-
-    @staticmethod
-    def from_args(args: argparse.Namespace) -> "RobomimicStandPolicy":
-        """
-        Create a RobomimicStandPolicy instance from parsed CLI arguments.
-
-        Path: CLI args → ConfigDataclass → init cls
-
-        Args:
-            args: Parsed command line arguments
-
-        Returns:
-            RobomimicStandPolicy instance
-        """
-        config = RobomimicStandPolicyArgs.from_cli_args(args)
-        return RobomimicStandPolicy(config)

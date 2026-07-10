@@ -9,7 +9,8 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.mimic_env_cfg import MimicEnvCfg
 from isaaclab.sim import RenderCfg, SimulationCfg
 from isaaclab.utils import configclass
-from isaaclab_newton.physics.newton_manager_cfg import MJWarpSolverCfg, NewtonCfg
+from isaaclab_newton.physics.mjwarp_manager_cfg import MJWarpSolverCfg
+from isaaclab_newton.physics.newton_manager_cfg import NewtonCfg
 from isaaclab_physx.physics import PhysxCfg
 from isaaclab_tasks.utils import PresetCfg
 
