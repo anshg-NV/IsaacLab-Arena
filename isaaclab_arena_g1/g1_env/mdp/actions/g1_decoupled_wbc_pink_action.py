@@ -79,7 +79,7 @@ class G1DecoupledWBCPinkAction(G1DecoupledWBCJointAction):
         """
         super().__init__(cfg, env)
 
-        assert self.num_envs == 1, "PINK controller currently only supports single environment"
+        assert not self.cfg.use_p_control or self.num_envs == 1, "PINK controller navigation P-controller only supports a single environment"
 
         self.navigation_p_controller = PController(
             distance_error_threshold=self.cfg.distance_error_threshold,
@@ -102,14 +102,17 @@ class G1DecoupledWBCPinkAction(G1DecoupledWBCJointAction):
         self._navigate_cmd = torch.zeros([self.num_envs, 3], device=self.device)
         self._torso_orientation_rpy_cmd = torch.zeros([self.num_envs, 3], device=self.device)
 
-        # Create the PINK IK controller. By default the IK only drives the "arms" group;
+        # Create one PINK IK controller per environment. By default the IK only drives the "arms" group;
         # the embodiment may extend this via `upperbody_extra_active_joints` (e.g. AGILE-pink
         # adds waist_roll_joint and waist_pitch_joint).
-        self.upperbody_controller = G1WBCUpperbodyController(
-            robot_model=self.robot_model,
-            body_active_joint_groups=list(self.cfg.upperbody_active_joint_groups),
-            extra_active_joints=list(self.cfg.upperbody_extra_active_joints),
-        )
+        self.upperbody_controllers = [
+            G1WBCUpperbodyController(
+                robot_model=self.robot_model,
+                body_active_joint_groups=list(self.cfg.upperbody_active_joint_groups),
+                extra_active_joints=list(self.cfg.upperbody_extra_active_joints),
+            )
+            for _ in range(self.num_envs)
+        ]
 
         # Map any extra (non-"upper_body"-group) IK-active joints to their sim-side joint
         # indices so we can splice the IK solution back into ``_processed_actions`` after
@@ -198,19 +201,15 @@ class G1DecoupledWBCPinkAction(G1DecoupledWBCJointAction):
         return self._navigate_cmd
 
     def compute_upperbody_joint_positions(
-        self, body_data: dict[str, np.ndarray], left_hand_state: torch.Tensor, right_hand_state: torch.Tensor
+        self, controller: G1WBCUpperbodyController, body_data: dict[str, np.ndarray], left_hand_state: torch.Tensor, right_hand_state: torch.Tensor
     ) -> np.ndarray:
-        """Run the PINK IK controller to compute the target joint positions for the upper body."""
-        if self.upperbody_controller.in_warmup:
+        """Run a single environment's PINK IK controller to compute the target joint positions for the upper body."""
+        if controller.in_warmup:
             for _ in range(50):
-                target_robot_joints = self.upperbody_controller.inverse_kinematics(
-                    body_data, left_hand_state, right_hand_state
-                )
-            self.upperbody_controller.in_warmup = False
+                target_robot_joints = controller.inverse_kinematics(body_data, left_hand_state, right_hand_state)
+            controller.in_warmup = False
         else:
-            target_robot_joints = self.upperbody_controller.inverse_kinematics(
-                body_data, left_hand_state, right_hand_state
-            )
+            target_robot_joints = controller.inverse_kinematics(body_data, left_hand_state, right_hand_state)
         return target_robot_joints
 
     # """
@@ -245,47 +244,54 @@ class G1DecoupledWBCPinkAction(G1DecoupledWBCJointAction):
         Upper body PINK controller
         **************************************************
         """
-        # Extract upper body left/right arm pos/quat from actions
-        left_arm_pos = actions_clone[:, LEFT_WRIST_POS_START_IDX:LEFT_WRIST_POS_END_IDX].squeeze(0).cpu()
-        left_arm_quat = actions_clone[:, LEFT_WRIST_QUAT_START_IDX:LEFT_WRIST_QUAT_END_IDX].squeeze(0).cpu()
-        right_arm_pos = actions_clone[:, RIGHT_WRIST_POS_START_IDX:RIGHT_WRIST_POS_END_IDX].squeeze(0).cpu()
-        right_arm_quat = actions_clone[:, RIGHT_WRIST_QUAT_START_IDX:RIGHT_WRIST_QUAT_END_IDX].squeeze(0).cpu()
+        upper_body_indices = self.robot_model.get_joint_group_indices("upper_body")
+        target_upper_body_joints = np.zeros((self.num_envs, len(upper_body_indices)))
+        self._last_ik_target_robot_joints = np.zeros((self.num_envs, self.robot_model.num_dofs))
 
-        # Sanitize zero-norm wrist quaternions to xyzw=(0,0,0,1) identity so scipy's
-        # R.from_quat doesn't raise. Real teleop/Mimic/RL trajectories always produce
-        # normalized quats; this only catches bootstrapping cases like the
-        # ``zero_action`` eval policy or smoke tests stepping with ``torch.zeros(...)``,
-        # where the wrist quat slice is all zeros.
-        left_arm_quat = _identity_if_zero_norm_xyzw(left_arm_quat)
-        right_arm_quat = _identity_if_zero_norm_xyzw(right_arm_quat)
+        for env_idx in range(self.num_envs):
+            # Extract upper body left/right arm pos/quat from actions
+            left_arm_pos = actions_clone[env_idx, LEFT_WRIST_POS_START_IDX:LEFT_WRIST_POS_END_IDX].cpu()
+            left_arm_quat = actions_clone[env_idx, LEFT_WRIST_QUAT_START_IDX:LEFT_WRIST_QUAT_END_IDX].cpu()
+            right_arm_pos = actions_clone[env_idx, RIGHT_WRIST_POS_START_IDX:RIGHT_WRIST_POS_END_IDX].cpu()
+            right_arm_quat = actions_clone[env_idx, RIGHT_WRIST_QUAT_START_IDX:RIGHT_WRIST_QUAT_END_IDX].cpu()
 
-        # Convert from pos/quat to 4x4 transform matrix
-        left_rotmat = R.from_quat(left_arm_quat).as_matrix()
-        right_rotmat = R.from_quat(right_arm_quat).as_matrix()
+            # Sanitize zero-norm wrist quaternions to xyzw=(0,0,0,1) identity so scipy's
+            # R.from_quat doesn't raise. Real teleop/Mimic/RL trajectories always produce
+            # normalized quats; this only catches bootstrapping cases like the
+            # ``zero_action`` eval policy or smoke tests stepping with ``torch.zeros(...)``,
+            # where the wrist quat slice is all zeros.
+            left_arm_quat = _identity_if_zero_norm_xyzw(left_arm_quat)
+            right_arm_quat = _identity_if_zero_norm_xyzw(right_arm_quat)
 
-        left_arm_pose = np.eye(4)
-        left_arm_pose[:3, :3] = left_rotmat
-        left_arm_pose[:3, 3] = left_arm_pos
+            # Convert from pos/quat to 4x4 transform matrix
+            left_rotmat = R.from_quat(left_arm_quat).as_matrix()
+            right_rotmat = R.from_quat(right_arm_quat).as_matrix()
 
-        right_arm_pose = np.eye(4)
-        right_arm_pose[:3, :3] = right_rotmat
-        right_arm_pose[:3, 3] = right_arm_pos
+            left_arm_pose = np.eye(4)
+            left_arm_pose[:3, :3] = left_rotmat
+            left_arm_pose[:3, 3] = left_arm_pos
 
-        # Extract left/right hand state from actions
-        left_hand_state = actions_clone[:, LEFT_HAND_STATE_IDX].squeeze(0).cpu()
-        right_hand_state = actions_clone[:, RIGHT_HAND_STATE_IDX].squeeze(0).cpu()
+            right_arm_pose = np.eye(4)
+            right_arm_pose[:3, :3] = right_rotmat
+            right_arm_pose[:3, 3] = right_arm_pos
 
-        # Assemble data format for running IK
-        body_data = {LEFT_WRIST_LINK_NAME: left_arm_pose, RIGHT_WRIST_LINK_NAME: right_arm_pose}
+            # Extract left/right hand state from actions
+            left_hand_state = actions_clone[env_idx, LEFT_HAND_STATE_IDX].cpu()
+            right_hand_state = actions_clone[env_idx, RIGHT_HAND_STATE_IDX].cpu()
 
-        # Run IK
-        target_robot_joints = self.compute_upperbody_joint_positions(body_data, left_hand_state, right_hand_state)
+            # Assemble data format for running IK
+            body_data = {LEFT_WRIST_LINK_NAME: left_arm_pose, RIGHT_WRIST_LINK_NAME: right_arm_pose}
 
-        # Reformat the joint position tensor to the correct order for G1 upper body
-        target_upper_body_joints = target_robot_joints[self.robot_model.get_joint_group_indices("upper_body")]
+            # Run IK
+            target_robot_joints = self.compute_upperbody_joint_positions(
+                self.upperbody_controllers[env_idx], body_data, left_hand_state, right_hand_state
+            )
 
-        # Stash the IK solution for the post-WBC writeback of extra (non-upper_body) joints.
-        self._last_ik_target_robot_joints = target_robot_joints
+            # Reformat the joint position tensor to the correct order for G1 upper body
+            target_upper_body_joints[env_idx] = target_robot_joints[upper_body_indices]
+
+            # Stash the IK solution for the post-WBC writeback of extra (non-upper_body) joints.
+            self._last_ik_target_robot_joints[env_idx] = target_robot_joints
 
         """
         **************************************************
@@ -399,7 +405,7 @@ class G1DecoupledWBCPinkAction(G1DecoupledWBCJointAction):
         if self._extra_active_joint_sim_indices:
             ik_targets = self._last_ik_target_robot_joints
             for sim_idx, full_idx in zip(self._extra_active_joint_sim_indices, self._extra_active_joint_full_indices):
-                self._processed_actions[:, sim_idx] = float(ik_targets[full_idx])
+                self._processed_actions[:, sim_idx] = torch.as_tensor(ik_targets[:, full_idx], dtype=torch.float32, device=self.device)
 
     def apply_actions(self):
         """Apply the computed joint positions based on the WBC solution."""

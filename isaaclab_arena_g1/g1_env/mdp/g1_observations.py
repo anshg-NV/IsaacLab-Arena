@@ -87,10 +87,10 @@ def extract_action_components(
 def is_navigating(
     env: ManagerBasedEnv,
 ) -> torch.Tensor:
-    return torch.tensor([copy.deepcopy(env.action_manager.get_term("g1_action").is_navigating)])
+    return torch.tensor([copy.deepcopy(env.action_manager.get_term("g1_action").is_navigating)] * env.num_envs)
 
 
 def navigation_goal_reached(
     env: ManagerBasedEnv,
 ) -> torch.Tensor:
-    return torch.tensor([copy.deepcopy(env.action_manager.get_term("g1_action").navigation_goal_reached)])
+    return torch.tensor([copy.deepcopy(env.action_manager.get_term("g1_action").navigation_goal_reached)] * env.num_envs)

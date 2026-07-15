@@ -3,7 +3,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import copy
 import gymnasium as gym
 import torch
 from collections import deque
@@ -58,6 +57,10 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
     Upper body: arm dims [0:16] are overwritten by the diffusion policy output each step.
 
     Frame stacking is managed internally using the frame_stack value from the checkpoint config.
+    Multi-env capable: observations keep their (num_envs, ...) batch dim, the diffusion UNet
+    denoises batched, and action chunks are queued per env (robomimic's own queued
+    ``get_action`` only serves batch index 0, so it is bypassed in favor of
+    ``_get_action_trajectory``).
     """
 
     name = "robomimic_stand"
@@ -73,7 +76,9 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
         self._base_height = config.base_height
         self._device = config.device
         self._checkpoint_path = config.robomimic_checkpoint
-        self._obs_history: dict | None = None
+        self._obs_history: dict[str, torch.Tensor] | None = None
+        self._action_queues: list[deque] | None = None
+        self._pending_history_reset: list[int] = []
         # LEAPP export runs once, on a step where the diffusion policy actually denoises.
         self._exported = False
 
@@ -111,32 +116,49 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
 
         obs = {}
         for k in _LOW_DIM_OBS_KEYS:
-            obs[k] = torch.squeeze(copy.deepcopy(policy_obs[k])).float()
+            obs[k] = policy_obs[k].clone().float()
         for k in _RGB_OBS_KEYS:
-            obs[k] = torch.squeeze(copy.deepcopy(camera_obs[k]))
+            obs[k] = camera_obs[k].clone()
+
+        num_envs = env.unwrapped.num_envs
 
         if self._obs_history is None:
             self._obs_history = {
-                k: deque([v.unsqueeze(0).clone() for _ in range(self._frame_stack)], maxlen=self._frame_stack)
-                for k, v in obs.items()
+                k: v.unsqueeze(1).repeat_interleave(self._frame_stack, dim=1) for k, v in obs.items()
             }
+            self._action_queues = [deque() for _ in range(num_envs)]
+            self._pending_history_reset = []
         else:
             for k, v in obs.items():
-                self._obs_history[k].append(v.unsqueeze(0).clone())
+                self._obs_history[k] = torch.roll(self._obs_history[k], shifts=-1, dims=1)
+                self._obs_history[k][:, -1] = v
 
-        stacked_obs = {k: torch.cat(list(q), dim=0) for k, q in self._obs_history.items()}
+            if self._pending_history_reset:
+                for k, v in obs.items():
+                    self._obs_history[k][self._pending_history_reset] = v[self._pending_history_reset].unsqueeze(1)
+                self._pending_history_reset = []
+
+        stacked_obs = self._obs_history
 
         # Export single-shot, and only on a step where the diffusion policy actually denoises
-        # (action queue empty). On queue-non-empty steps get_action returns a cached action from
+        # (action queues empty). On queue-non-empty steps get_action returns a cached action from
         # a prior step that isn't connected to this step's annotated input -> "non-traced tensors".
-        exporting = not self._exported and len(self._policy.policy.action_queue) == 0
+        exporting = not self._exported and len(self._action_queues[0]) == 0
         if exporting:
             graph_name = self._env_graph_name(env)
             leapp.start(name=graph_name)
             stacked_obs = dict(zip(stacked_obs.keys(), annotate.input_tensors(graph_name, stacked_obs)))
 
-        model_obs = self._policy._prepare_observation(stacked_obs)
-        dp_actions = self._policy.policy.get_action(obs_dict=model_obs, goal_dict=None).to(device=env_device)
+        model_obs = self._policy._prepare_observation(stacked_obs, batched_ob=True)
+
+        needs_trajectory = [env_id for env_id in range(num_envs) if len(self._action_queues[env_id]) == 0]
+        if needs_trajectory:
+            sub_obs = {k: v[needs_trajectory] for k, v in model_obs.items()}
+            action_sequences = self._policy.policy._get_action_trajectory(obs_dict=sub_obs)  # (n, Ta, Da)
+            for action_sequence, env_id in zip(action_sequences, needs_trajectory):
+                self._action_queues[env_id].extend(action_sequence)
+
+        dp_actions = torch.stack([self._action_queues[env_id].popleft() for env_id in range(num_envs)]).to(device=env_device)
 
         # snap continuous gripper output back to the binary {open, closed} values the
         # WBC controller expects (it treats any non-zero hand_state as closed)
@@ -167,6 +189,18 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
         return action
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
-        if self._policy is not None:
-            self._policy.start_episode()
-        self._obs_history = None
+        if env_ids is None:
+            if self._policy is not None:
+                self._policy.start_episode()
+            self._obs_history = None
+            self._action_queues = None
+            self._pending_history_reset = []
+            return
+
+        if self._action_queues is None:
+            return
+
+        env_id_list = env_ids.flatten().tolist()
+        for env_id in env_id_list:
+            self._action_queues[env_id].clear()
+        self._pending_history_reset = list(set(self._pending_history_reset).union(env_id_list))

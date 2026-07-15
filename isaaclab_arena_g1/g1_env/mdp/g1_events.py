@@ -22,8 +22,10 @@ def reset_decoupled_wbc_joint_policy(env: ManagerBasedEnv, env_ids: torch.Tensor
 
 def reset_decoupled_wbc_pink_policy(env: ManagerBasedEnv, env_ids: torch.Tensor):
     # Reset upper body IK solver
-    env.action_manager.get_term("g1_action").upperbody_controller.body_ik_solver.initialize()
-    env.action_manager.get_term("g1_action").upperbody_controller.in_warmup = True
+    upperbody_controllers = env.action_manager.get_term("g1_action").upperbody_controllers
+    for env_id in env_ids.tolist():
+        upperbody_controllers[env_id].body_ik_solver.initialize()
+        upperbody_controllers[env_id].in_warmup = True
 
     # Reset lower body RL-based policy
     policy = env.action_manager.get_term("g1_action").get_wbc_policy
