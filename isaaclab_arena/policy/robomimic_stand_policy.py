@@ -14,9 +14,6 @@ import robomimic.utils.file_utils as FileUtils
 from isaaclab_arena.assets.register import register_policy
 from isaaclab_arena.policy.policy_base import PolicyBase, PolicyCfg
 
-import leapp
-from leapp import annotate, TensorSemantics
-from leapp.utils.enums import InputKindEnum
 
 # G1 WBC + PINK IK action vector layout (23 dims total):
 #   [0]     left gripper
@@ -41,18 +38,6 @@ _LOW_DIM_OBS_KEYS = [
 ]
 _RGB_OBS_KEYS = ["robot_head_cam_rgb"]
 
-# LEAPP semantic ``kind`` for each observation fed to the exported graph. Positions/quats
-# are per-arm end-effector states; the wrist poses are 4x4 homogeneous transforms; the head
-# camera has no matching enum, so it uses a custom string kind.
-_OBS_INPUT_KIND = {
-    "left_eef_pos": InputKindEnum.BODY_POSITION,
-    "left_eef_quat": InputKindEnum.BODY_ROTATION,
-    "left_wrist_pose_pelvis_frame": InputKindEnum.BODY_POSE,
-    "right_eef_pos": InputKindEnum.BODY_POSITION,
-    "right_eef_quat": InputKindEnum.BODY_ROTATION,
-    "right_wrist_pose_pelvis_frame": InputKindEnum.BODY_POSE,
-    "robot_head_cam_rgb": "observation/image/rgb",
-}
 # Per-element labels only where the layout is unambiguous (xyz positions). Quaternions,
 # 4x4 pose matrices, and the image tensor are left unlabeled.
 _OBS_ELEMENT_NAMES = {
@@ -94,6 +79,7 @@ class RobomimicStandPolicyCfg(PolicyCfg):
     robomimic_checkpoint: str
     base_height: float = 0.78
     device: str = "cuda:0"
+    leapp_export: bool = False
 
 
 @register_policy
@@ -123,6 +109,7 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
         self._base_height = config.base_height
         self._device = config.device
         self._checkpoint_path = config.robomimic_checkpoint
+        self._leapp_export = config.leapp_export
         self._obs_history: dict[str, torch.Tensor] | None = None
         self._action_queues: list[deque] | None = None
         self._pending_history_reset: list[int] = []
@@ -210,10 +197,24 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
         # Export single-shot, and only on a step where the diffusion policy actually denoises
         # (action queues empty). On queue-non-empty steps get_action returns a cached action from
         # a prior step that isn't connected to this step's annotated input -> "non-traced tensors".
-        exporting = not self._exported and len(self._action_queues[0]) == 0
+        exporting = self._leapp_export and not self._exported and len(self._action_queues[0]) == 0
 
         noise = None
         if exporting:
+            import leapp
+            from leapp import TensorSemantics, annotate
+            from leapp.utils.enums import InputKindEnum
+
+            # LEAPP semantic kinds for observations fed to the exported graph.
+            obs_input_kind = {
+                "left_eef_pos": InputKindEnum.BODY_POSITION,
+                "left_eef_quat": InputKindEnum.BODY_ROTATION,
+                "left_wrist_pose_pelvis_frame": InputKindEnum.BODY_POSE,
+                "right_eef_pos": InputKindEnum.BODY_POSITION,
+                "right_eef_quat": InputKindEnum.BODY_ROTATION,
+                "right_wrist_pose_pelvis_frame": InputKindEnum.BODY_POSE,
+                "robot_head_cam_rgb": "observation/image/rgb",
+            }
             Tp = self._policy.policy.algo_config.horizon.prediction_horizon
             action_dim = self._policy.policy.ac_dim
             noise = torch.randn((num_envs, Tp, action_dim), device=self._device)
@@ -221,7 +222,7 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
             graph_name = self._env_graph_name(env)
             leapp.start(name=graph_name)
             input_semantics = [
-                TensorSemantics(k, v, kind=_OBS_INPUT_KIND.get(k), element_names=_OBS_ELEMENT_NAMES.get(k))
+                TensorSemantics(k, v, kind=obs_input_kind.get(k), element_names=_OBS_ELEMENT_NAMES.get(k))
                 for k, v in stacked_obs.items()
             ]
             input_semantics.append(TensorSemantics("diffusion_noise", noise, kind="noise/gaussian"))
