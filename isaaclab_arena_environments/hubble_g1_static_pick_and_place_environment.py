@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import argparse
-from typing import TYPE_CHECKING
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from isaaclab_arena.assets.register import register_environment
 from isaaclab_arena_environments.example_environment_base import ExampleEnvironmentBase
@@ -50,6 +51,39 @@ def _apply_legacy_datagen_name_override(
     return env_cfg
 
 
+def _set_plate_white_tint(env: Any, env_ids: Any) -> None:
+    """Apply the deterministic white tint to the Hubble clay plate."""
+    from pxr import Gf, Usd, UsdShade
+
+    material_inputs = {}
+    for env_id in env_ids.tolist():
+        plate_path = f"{env.scene.env_prim_paths[int(env_id)]}/clay_plates_hot3d_robolab"
+        plate_prim = env.scene.stage.GetPrimAtPath(plate_path)
+        assert plate_prim.IsValid(), f"Plate prim not found at {plate_path}."
+
+        for prim in Usd.PrimRange(plate_prim):
+            if "obj_000003_Mesh" not in prim.GetName():
+                continue
+
+            material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+            if not material:
+                continue
+
+            for material_prim in Usd.PrimRange(material.GetPrim()):
+                if material_prim.GetTypeName() != "Shader":
+                    continue
+
+                material_input = UsdShade.Shader(material_prim).GetInput("diffuse_tint")
+                if material_input:
+                    material_inputs[str(material_input.GetAttr().GetPath())] = material_input
+
+    assert material_inputs, "No diffuse_tint input found on the Hubble clay plate."
+
+    color = Gf.Vec3f(1.32, 1.77, 3.03)
+    for material_input in material_inputs.values():
+        material_input.Set(color)
+
+
 @register_environment
 class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
     """G1 (WBC-balanced, no nav) pick-and-place on a table.
@@ -62,9 +96,10 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
 
     def get_env(self, args_cli: argparse.Namespace) -> IsaacLabArenaEnvironment:
         from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
+        from isaaclab_arena.relations.relations import IsAnchor, On, PositionLimits
         from isaaclab_arena.scene.scene import Scene
         from isaaclab_arena.tasks.hubble_pick_and_place import HubblePickAndPlaceMimicEnvCfg, HubblePickAndPlaceTask
-        from isaaclab_arena.utils.pose import Pose, PoseRange
+        from isaaclab_arena.utils.pose import Pose
         from isaaclab_arena_environments.mdp.galileo_g1_static_pick_and_place.robot_configs import (
             G1_STATIC_FINGER_DYNAMIC_FRICTION,
             G1_STATIC_FINGER_FRICTION_MATERIAL_PATH,
@@ -74,9 +109,9 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
         )
 
         background = self.asset_registry.get_asset_by_name("hubble_background")()
-        table = self.asset_registry.get_asset_by_name("hubble_table")()
-        pick_up_object = self.asset_registry.get_asset_by_name(args_cli.object)(scale=(0.009, 0.009, 0.009))
-        destination = self.asset_registry.get_asset_by_name(args_cli.destination)(scale=(0.5, 0.5, 0.5))
+        table = self.asset_registry.get_asset_by_name("hubble_table")(scale=(0.98, 0.90, 1.0774193548387097))
+        pick_up_object = self.asset_registry.get_asset_by_name(args_cli.object)(scale=(0.0117551, 0.0121355, 0.0118187))
+        destination = self.asset_registry.get_asset_by_name(args_cli.destination)(scale=(0.7618191, 0.7583220, 0.5307171))
 
         # Add ground plane and light to the scene
         ground_plane = self.asset_registry.get_asset_by_name("ground_plane")()
@@ -88,6 +123,7 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
             enable_cameras=args_cli.enable_cameras,
             lock_waist=True,
         )
+        embodiment.scene_config.robot.spawn.usd_path = str(Path(__file__).resolve().parents[1] / "isaaclab_arena/embodiments/g1/assets/g1_sim2real.usd")
         embodiment.set_finger_contact_friction(
             material_path=G1_STATIC_FINGER_FRICTION_MATERIAL_PATH,
             static_friction=G1_STATIC_FINGER_STATIC_FRICTION,
@@ -100,12 +136,12 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
         else:
             teleop_device = None
 
-        # Set all positions
-        pick_up_object.set_initial_pose(PoseRange(
-            position_xyz_min=(0.10, 0.15, 0.775),
-            position_xyz_max=(0.20, 0.25, 0.775),
-        ))
-        destination.set_initial_pose(Pose(position_xyz=(-0.10, 0.25, 0.755)))
+        table.set_initial_pose(Pose(position_xyz=(0.0, 0.0, 0.0)))
+        table.add_relation(IsAnchor())
+        pick_up_object.add_relation(On(table, clearance_m=0.002))
+        pick_up_object.add_relation(PositionLimits(x_min=0.10, x_max=0.20, y_min=0.15, y_max=0.25))
+        destination.add_relation(On(table, clearance_m=0.002, edge_margin_m=0.005))
+        destination.add_relation(PositionLimits(x_min=-0.12, x_max=-0.08, y_min=0.185, y_max=0.225))
 
         embodiment.set_initial_pose(Pose(position_xyz=(0.0, 0.55, 0.78), rotation_xyzw=(0.0, 0.0, -0.7071068, 0.7071068)))
         embodiment.set_joint_initial_pos(G1_STATIC_OPEN_ARM_JOINT_POS)
@@ -113,11 +149,16 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
         task_description = f"Pick up the {args_cli.object.replace("_", " ")} from the table and place it onto the {args_cli.destination.replace("_", " ")}."
 
         def env_cfg_callback(env_cfg):
-            return _apply_legacy_datagen_name_override(
+            env_cfg = _apply_legacy_datagen_name_override(
                 env_cfg,
                 pick_up_object_name=pick_up_object.name,
                 destination_name=destination.name,
             )
+
+            env_cfg.viewer.eye = (-1.35, -1.30, 2.275)
+            env_cfg.viewer.lookat = (0.15, 0.20, 0.775)
+            env_cfg.viewer.origin_type = "env"
+            return env_cfg
 
         def _build_hubble_pick_and_place_mimic_cfg(arm_mode):
             return HubblePickAndPlaceMimicEnvCfg(
