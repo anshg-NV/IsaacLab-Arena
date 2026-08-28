@@ -122,10 +122,12 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
             verbose=True,
         )
 
-        try:
-            self._frame_stack = max(1, int(self._policy.policy.global_config.train.frame_stack))
-        except AttributeError:
-            self._frame_stack = 1
+        algo_horizon = self._policy.policy.global_config.algo.get("horizon", {})
+        self._frame_stack = max(1, int(algo_horizon.get("observation_horizon", 1)))
+
+        train_frame_stack = int(self._policy.policy.global_config.train.get("frame_stack", self._frame_stack))
+        if train_frame_stack != self._frame_stack:
+            print(f"[RobomimicStandPolicy] WARNING: checkpoint has train.frame_stack={train_frame_stack} but algo.horizon.observation_horizon={self._frame_stack}. Rollouts feed the last {self._frame_stack} observations, which is not the window this policy was trained on.")
 
     def _env_graph_name(self, env: gym.Env) -> str:
         """Name the exported LEAPP graph after the environment's registered task id.

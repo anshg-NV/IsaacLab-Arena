@@ -100,10 +100,19 @@ class G1EmbodimentBase(EmbodimentBase):
         )
 
 
-# Default camera offset pose
+# Color optical-frame pose from robot /tf_static
 _DEFAULT_G1_CAMERA_OFFSET = Pose(
-    position_xyz=(0.04485, 0.0, 0.35325), rotation_xyzw=(-0.62721, 0.62721, -0.32651, 0.32651)
+    position_xyz=(0.05356204, 0.03221886, 0.47434517), rotation_xyzw=(-0.66012282, 0.65814544, -0.25305284, 0.25893377)
 )
+
+# Intrinsics matrix from robot /realsense_d435_rgb/color/camera_info, at 320x240
+# [fx, 0, cx, 0, fy, cy, 0, 0, 1]
+# Omniverse averages fx/fy and centers the principal point, so cx/cy are only matched approximately
+_G1_HEAD_CAM_INTRINSICS = [
+    303.9342346191406, 0.0,              159.9081573486328,
+    0.0,               303.904052734375, 126.57707977294922,
+    0.0,               0.0,              1.0,
+]
 
 
 @register_asset
@@ -526,7 +535,10 @@ class G1CameraCfg:
             height=240,
             width=320,
             data_types=["rgb"],
-            spawn=sim_utils.PinholeCameraCfg(
+            spawn=sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
+                intrinsic_matrix=_G1_HEAD_CAM_INTRINSICS,
+                width=320,
+                height=240,
                 focal_length=15,
                 clipping_range=(0.1, 5),
             ),
@@ -814,6 +826,29 @@ def _remove_waist_from_pink_ik_action_config(
     ]
 
 
+def _perturb_quat(quat: torch.Tensor, noise_scale: torch.Tensor | float) -> torch.Tensor:
+    """Rotate a unit quaternion by a small random rotation.
+
+    The perturbation is drawn in the tangent space as an axis-angle vector and composed with
+    ``quat``, so the result stays unit-norm. Adding noise to the quaternion components directly
+    leaves the unit sphere, and its radial part perturbs nothing anyway, since a quaternion's
+    scale carries no rotation.
+
+    The factor of two preserves the angular spread that component-wise noise of the same scale
+    used to produce: a rotation of angle ``theta`` displaces a unit quaternion by about
+    ``theta / 2``.
+
+    Args:
+        quat: Unit quaternion to perturb, in (x, y, z, w). Shape is (4,).
+        noise_scale: Noise amplitude of the owning subtask; the perturbation angle about each
+            axis has standard deviation ``2 * noise_scale`` [rad].
+    """
+    axis_angle = 2.0 * noise_scale * torch.randn(3, device=quat.device, dtype=quat.dtype)
+    angle = torch.linalg.norm(axis_angle).reshape(1)
+    delta_quat = PoseUtils.quat_from_angle_axis(angle, axis_angle.reshape(1, 3))
+    return PoseUtils.quat_mul(delta_quat.reshape(4), quat)
+
+
 @configclass
 class G1WBCJointEventCfg:
     """Configuration for events."""
@@ -894,13 +929,11 @@ class G1MimicEnv(ManagerBasedRLMimicEnv):
         if action_noise_dict is not None:
             pos_noise_left = action_noise_dict["left"] * torch.randn_like(target_left_eef_pos)
             pos_noise_right = action_noise_dict["right"] * torch.randn_like(target_right_eef_pos)
-            quat_noise_left = action_noise_dict["left"] * torch.randn_like(target_left_eef_rot_quat)
-            quat_noise_right = action_noise_dict["right"] * torch.randn_like(target_right_eef_rot_quat)
 
             target_left_eef_pos += pos_noise_left
             target_right_eef_pos += pos_noise_right
-            target_left_eef_rot_quat += quat_noise_left
-            target_right_eef_rot_quat += quat_noise_right
+            target_left_eef_rot_quat = _perturb_quat(target_left_eef_rot_quat, action_noise_dict["left"])
+            target_right_eef_rot_quat = _perturb_quat(target_right_eef_rot_quat, action_noise_dict["right"])
 
         return torch.cat(
             (
