@@ -13,6 +13,7 @@ from isaaclab_arena.cli.dataclass_cli import (
     assert_cli_defaults_match_dataclass,
     dataclass_from_cli,
 )
+from isaaclab_arena.utils.experiment_paths import ExperimentPaths
 
 if TYPE_CHECKING:
     from isaaclab_arena.policy.policy_base import PolicyBase, PolicyCfg
@@ -47,6 +48,33 @@ def add_policy_cli_args(
     policy_cfg_type = PolicyRegistry().get_policy_cfg_type(policy_type)
     _add_policy_cfg_arguments(parser, policy_cfg_type)
     return parser
+
+
+def apply_experiment_checkpoint(parser: argparse.ArgumentParser, args_cli: argparse.Namespace) -> None:
+    """Point the policy's checkpoint flag at ``--checkpoint`` inside the experiment's run directory.
+
+    A policy config without a checkpoint default generates a required flag, so this supplies the
+    default and clears that requirement. Passing the policy's own checkpoint flag still wins, since
+    an explicit CLI value overrides the default. Call after :func:`add_policy_cli_args` and before
+    the parse that reads the policy flags.
+    """
+    if args_cli.checkpoint is None:
+        return
+
+    assert args_cli.experiment is not None and args_cli.run is not None, (
+        "--checkpoint is resolved inside an experiment, so it needs --experiment and --run. Pass the policy's own"
+        " checkpoint flag to use a path outside the experiments tree."
+    )
+    checkpoint_path = ExperimentPaths(args_cli.experiment).run_dir(args_cli.run) / args_cli.checkpoint
+    assert checkpoint_path.exists(), f"No checkpoint at {checkpoint_path}"
+
+    checkpoint_actions = [action for action in parser._actions if action.dest.endswith("checkpoint_path")] + [
+        action for action in parser._actions if action.dest.endswith("_checkpoint")
+    ]
+    assert checkpoint_actions, "The selected policy has no checkpoint flag for --checkpoint to fill"
+    for action in checkpoint_actions:
+        action.default = str(checkpoint_path)
+        action.required = False
 
 
 def policy_cfg_from_cli(
@@ -104,7 +132,37 @@ def add_policy_runner_arguments(parser: argparse.ArgumentParser) -> None:
         default="/eval/output",
         help=(
             "Base directory for evaluation outputs (videos, per-episode results, report); a"
-            " reverse-dated run subdirectory is added per run."
+            " reverse-dated run subdirectory is added per run. Ignored when --experiment is given."
+        ),
+    )
+    parser.add_argument(
+        "--experiment",
+        type=str,
+        default=None,
+        help=(
+            "Experiment name. When given, outputs go to experiments/<experiment>/eval/<run>/eval/<eval_name> and a"
+            " record is appended to experiments/<experiment>/eval/results.jsonl, overriding --output_base_dir."
+        ),
+    )
+    parser.add_argument(
+        "--run",
+        type=str,
+        default=None,
+        help="Training run being evaluated, e.g. '0'. Required with --experiment.",
+    )
+    parser.add_argument(
+        "--eval_name",
+        type=str,
+        default=None,
+        help="Name of this evaluation within the run. Defaults to the next unused 'eval_<n>'.",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Checkpoint to evaluate, relative to the run directory, e.g. 'models/model_epoch_600.pth' or 'last.pth'."
+            " Requires --experiment and --run. The policy's own checkpoint flag takes precedence."
         ),
     )
     parser.add_argument(

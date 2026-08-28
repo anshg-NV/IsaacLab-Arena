@@ -6,22 +6,27 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import os
 import json
+import tempfile
 
 import torch
 import tqdm
 from importlib import import_module
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from isaaclab_arena.assets.registries import PolicyRegistry
+from isaaclab_arena.cli.argv_defaults import apply_argv_defaults, apply_default_environment
 from isaaclab_arena.cli.isaaclab_arena_cli import get_isaaclab_arena_cli_parser
 from isaaclab_arena.evaluation.policy_runner_cli import (
     add_policy_cli_args,
     add_policy_runner_arguments,
+    apply_experiment_checkpoint,
     build_policy_from_cli,
 )
 from isaaclab_arena.metrics.metrics_logger import metrics_to_plain_python_types
+from isaaclab_arena.utils.experiment_paths import ExperimentPaths
 from isaaclab_arena.utils.hydra_overrides import assert_hydra_overrides
 from isaaclab_arena.utils.isaaclab_utils.simulation_app import SimulationAppContext
 from isaaclab_arena.utils.multiprocess import get_local_rank, get_world_size
@@ -32,6 +37,13 @@ from isaaclab_arena_environments.cli import get_arena_builder_from_cli, get_isaa
 if TYPE_CHECKING:
     from isaaclab_arena.metrics.metric_data import MetricsDataCollection
     from isaaclab_arena.policy.policy_base import PolicyBase
+
+
+DEFAULT_VALUED_ARGS = (("--viz", "kit"), ("--policy_type", "robomimic_stand"))
+"""Valued flags this script fills in when they are absent from the command line."""
+
+DEFAULT_FLAGS = ("--enable_cameras",)
+"""Boolean flags this script sets when they are absent from the command line."""
 
 
 def get_policy_cls(policy_type: str) -> type[PolicyBase]:
@@ -81,27 +93,64 @@ def _to_jsonable(value: Any) -> Any:
     return str(value)
 
 
-def emit_final_metrics(metrics: dict[str, Any], args_cli: argparse.Namespace, local_rank: int, world_size: int) -> None:
-    """Emit final metrics as parseable JSON and append them to a JSONL file."""
+def is_anonymous_run(args_cli: argparse.Namespace) -> bool:
+    """Whether this run only exists to produce a LEAPP export, and should leave no evaluation record."""
+    return bool(getattr(args_cli, "leapp_export", False))
+
+
+def resolve_output_dir(args_cli: argparse.Namespace) -> str:
+    """Directory this evaluation writes its outputs to.
+
+    With ``--experiment``, that is ``eval/<run>/eval/<eval name>`` inside the experiment, where the
+    name defaults to the next unused ``eval_<n>``; otherwise a reverse-dated subdirectory of
+    ``--output_base_dir``.
+
+    An anonymous run writes to ``eval/<run>/leapp`` instead, so any recorded video sits with the run
+    without landing in its evaluation record. Nothing creates the directory unless a recorder writes.
+    """
+    if is_anonymous_run(args_cli):
+        if args_cli.experiment is not None and args_cli.run is not None:
+            return str(ExperimentPaths(args_cli.experiment).leapp_dir(args_cli.run))
+        return os.path.join(tempfile.gettempdir(), "policy_runner_leapp_export")
+    if args_cli.experiment is None:
+        return timestamped_run_dir(args_cli.output_base_dir)
+    assert args_cli.run is not None, "--run is required when --experiment is given"
+    paths = ExperimentPaths(args_cli.experiment)
+    eval_name = args_cli.eval_name or paths.next_eval_name(args_cli.run)
+    return str(paths.eval_dir(args_cli.run, eval_name))
+
+
+def emit_final_metrics(
+    metrics: dict[str, Any],
+    args_cli: argparse.Namespace,
+    local_rank: int,
+    world_size: int,
+    output_dir: str,
+) -> None:
+    """Emit final metrics as parseable JSON and, with ``--experiment``, append them to the experiment's JSONL."""
     record = _to_jsonable(
         {
+            "experiment": args_cli.experiment,
+            "run": args_cli.run,
+            "eval_name": os.path.basename(output_dir) if args_cli.experiment is not None else None,
+            "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
             "rank": local_rank,
             "world_size": world_size,
-            "checkpoint_path": getattr(args_cli, "robomimic_checkpoint"),
+            "checkpoint_path": getattr(args_cli, "robomimic_checkpoint", None),
+            "num_episodes": args_cli.num_episodes,
+            "output_dir": output_dir,
             "metrics": metrics,
         }
     )
     metrics_json = json.dumps(record, sort_keys=True)
     print(f"POLICY_RUNNER_FINAL_METRICS_JSON: {metrics_json}", flush=True)
 
-    metrics_output_file = 'submodules/IsaacLab/logs/hubble/policy_runner_metrics.jsonl'
-    if metrics_output_file is None:
+    if args_cli.experiment is None or is_anonymous_run(args_cli):
         return
 
-    metrics_output_dir = os.path.dirname(metrics_output_file)
-    if metrics_output_dir:
-        os.makedirs(metrics_output_dir, exist_ok=True)
-    with open(metrics_output_file, "a", encoding="utf-8") as f:
+    results_path = ExperimentPaths(args_cli.experiment).results_jsonl
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(results_path, "a", encoding="utf-8") as f:
         f.write(metrics_json + "\n")
 
 
@@ -182,6 +231,8 @@ def main():
     """Run an IsaacLab Arena environment with a policy.
     Use --distributed with torchrun command for one process per GPU on multi-GPU machines. AppLauncher uses LOCAL_RANK for device.
     """
+    apply_argv_defaults(DEFAULT_VALUED_ARGS, DEFAULT_FLAGS, label="policy_runner")
+
     args_parser = get_isaaclab_arena_cli_parser()
     # We do this as the parser is shared between the example environment and policy runner
     args_cli, unknown = args_parser.parse_known_args()
@@ -213,7 +264,11 @@ def main():
         # Add the example environment arguments and config-derived policy arguments.
         args_parser = get_isaaclab_arena_environments_cli_parser(args_parser)
         args_parser = add_policy_cli_args(args_parser, policy_cls)
+        apply_experiment_checkpoint(args_parser, args_cli)
         args_cli, hydra_overrides = args_parser.parse_known_args()
+
+        if apply_default_environment(args_cli, label="policy_runner"):
+            args_cli, hydra_overrides = args_parser.parse_known_args()
         assert_hydra_overrides(hydra_overrides, args_parser)
         # Re-apply per-rank device after parse preventing device got overwritten by the default value
         if is_distributed(args_cli):
@@ -234,7 +289,13 @@ def main():
             print(arena_builder.get_variations_catalogue_as_string())
             return
 
-        output_dir = timestamped_run_dir(args_cli.output_base_dir)
+        # A LEAPP export run leaves no evaluation record: no per-episode results, metrics or report.
+        # Requested videos are still recorded, so the exported policy can be watched running.
+        anonymous_run = is_anonymous_run(args_cli)
+
+        output_dir = resolve_output_dir(args_cli)
+        if anonymous_run and (args_cli.record_viewport_video or args_cli.record_camera_video):
+            print(f"[LEAPP export] Recording video to {output_dir}")
         video_cfg = VideoRecordingCfg(
             record_viewport_video=args_cli.record_viewport_video,
             record_camera_video=args_cli.record_camera_video,
@@ -242,10 +303,11 @@ def main():
         )
         env = arena_builder.make_registered(render_mode=video_cfg.render_mode)
 
-        # Write per-episode results to disk.
-        results_path = os.path.join(output_dir, f"episode_results_rank{local_rank}.jsonl")
-        env.unwrapped.episode_recorder.set_job_name("policy_runner")
-        env.unwrapped.episode_recorder.set_output_path(results_path)
+        # Write per-episode results to disk. Without an output path the recorder keeps them in memory only.
+        if not anonymous_run:
+            results_path = os.path.join(output_dir, f"episode_results_rank{local_rank}.jsonl")
+            env.unwrapped.episode_recorder.set_job_name("policy_runner")
+            env.unwrapped.episode_recorder.set_output_path(results_path)
 
         # Create the policy through the typed config compatibility adapter.
         policy = build_policy_from_cli(policy_cls, args_cli)
@@ -276,7 +338,8 @@ def main():
         if metrics is not None:
             metrics_plain = metrics_to_plain_python_types(metrics)
             print(f"[Rank {local_rank}/{world_size}] Metrics: {metrics_plain}")
-            emit_final_metrics(metrics_plain, args_cli, local_rank, world_size)
+            if not anonymous_run:
+                emit_final_metrics(metrics_plain, args_cli, local_rank, world_size, output_dir)
 
         # NOTE(huikang, 2025-12-30)Explicitly clean up the remote policy client / server.
         # Do NOT rely on a __del__ destructor in policy for this, since destructors are
@@ -290,7 +353,7 @@ def main():
 
         # Write and serve the evaluation report.
         # Only the local rank 0 writes/serves it, to avoid races on a shared output dir.
-        if get_local_rank() == 0:
+        if get_local_rank() == 0 and not anonymous_run:
             report_path = build_report(output_dir)
             if args_cli.serve_evaluation_report:
                 serve_until_ctrl_c(report_path.parent, args_cli.evaluation_report_port, report_path.name)

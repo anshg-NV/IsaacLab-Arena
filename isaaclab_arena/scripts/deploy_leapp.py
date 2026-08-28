@@ -15,11 +15,20 @@ The env is specified exactly as for ``policy_runner`` (example-environment subco
 ``--env_graph_spec_yaml``, ``--embodiment ...``, ``--enable_cameras``); add ``--leapp_model <path>``.
 """
 
+from isaaclab_arena.cli.argv_defaults import apply_argv_defaults, apply_default_environment
 from isaaclab_arena.cli.isaaclab_arena_cli import get_isaaclab_arena_cli_parser
 from isaaclab_arena.utils.isaaclab_utils.simulation_app import SimulationAppContext
 
+DEFAULT_VALUED_ARGS = (("--viz", "kit"),)
+"""Valued flags this script fills in when they are absent from the command line."""
+
+DEFAULT_FLAGS = ("--enable_cameras",)
+"""Boolean flags this script sets when they are absent from the command line."""
+
 
 def main():
+    apply_argv_defaults(DEFAULT_VALUED_ARGS, DEFAULT_FLAGS, label="deploy_leapp")
+
     # Base Arena CLI (app launcher + Isaac Lab + Arena args); parse once to launch the sim app.
     parser = get_isaaclab_arena_cli_parser()
     parser.add_argument(
@@ -40,6 +49,8 @@ def main():
         # Add the example-environment args, then resolve the Arena env cfg (no gym env built yet).
         env_parser = get_isaaclab_arena_environments_cli_parser(parser)
         args_cli, hydra_overrides = env_parser.parse_known_args()
+        if apply_default_environment(args_cli, label="deploy_leapp"):
+            args_cli, hydra_overrides = env_parser.parse_known_args()
 
         arena_builder = get_arena_builder_from_cli(args_cli, hydra_overrides=hydra_overrides)
         # build_registered returns (name, cfg, env_kwargs); the deployment env builds the env itself.
