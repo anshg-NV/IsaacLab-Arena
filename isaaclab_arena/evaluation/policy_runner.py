@@ -234,6 +234,12 @@ def main():
     apply_argv_defaults(DEFAULT_VALUED_ARGS, DEFAULT_FLAGS, label="policy_runner")
 
     args_parser = get_isaaclab_arena_cli_parser()
+    args_parser.add_argument(
+        "--domain_randomization_config",
+        type=str,
+        default=None,
+        help="Optional AutoData domain-randomization YAML applied before environment creation.",
+    )
     # We do this as the parser is shared between the example environment and policy runner
     args_cli, unknown = args_parser.parse_known_args()
 
@@ -301,7 +307,12 @@ def main():
             record_camera_video=args_cli.record_camera_video,
             video_base_dir=output_dir,
         )
-        env = arena_builder.make_registered(render_mode=video_cfg.render_mode)
+        env_name, env_cfg, env_kwargs = arena_builder.build_registered()
+        if args_cli.domain_randomization_config:
+            from isaac_autodata_interfaces.domain_randomization import apply_domain_randomization_from_yaml
+
+            apply_domain_randomization_from_yaml(env_cfg, env_name, args_cli.domain_randomization_config, args_cli.num_envs)
+        env = arena_builder.make_registered(env_cfg, env_kwargs, render_mode=video_cfg.render_mode)
 
         # Write per-episode results to disk. Without an output path the recorder keeps them in memory only.
         if not anonymous_run:

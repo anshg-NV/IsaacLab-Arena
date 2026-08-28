@@ -37,6 +37,12 @@ parser.add_argument(
     help="File path to export recorded and generated episodes.",
 )
 parser.add_argument(
+    "--domain_randomization_config",
+    type=str,
+    default=None,
+    help="Optional AutoData domain-randomization YAML applied before environment creation.",
+)
+parser.add_argument(
     "--pause_subtask",
     action="store_true",
     help="pause after every subtask during generation for debugging - only useful with render flag",
@@ -107,6 +113,10 @@ def setup_env_config(
     """
     arena_builder = get_arena_builder_from_cli(args_cli)
     env_name, env_cfg, env_kwargs = arena_builder.build_registered()
+
+    if args_cli.domain_randomization_config:
+        from isaac_autodata_interfaces.domain_randomization import apply_domain_randomization_from_yaml
+        apply_domain_randomization_from_yaml(env_cfg, env_name, args_cli.domain_randomization_config, num_envs)
 
     if generation_num_trials is not None:
         env_cfg.datagen_config.generation_num_trials = generation_num_trials

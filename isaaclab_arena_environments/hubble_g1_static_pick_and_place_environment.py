@@ -95,6 +95,8 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
     name: str = "hubble_g1_static_pick_and_place"
 
     def get_env(self, args_cli: argparse.Namespace) -> IsaacLabArenaEnvironment:
+        using_domain_randomization_config = bool(getattr(args_cli, "domain_randomization_config", None))
+
         from isaaclab_arena.environments.isaaclab_arena_environment import IsaacLabArenaEnvironment
         from isaaclab_arena.relations.relations import IsAnchor, On, PositionLimits
         from isaaclab_arena.scene.scene import Scene
@@ -154,6 +156,10 @@ class HubbleG1StaticPickAndPlaceEnvironment(ExampleEnvironmentBase):
                 pick_up_object_name=pick_up_object.name,
                 destination_name=destination.name,
             )
+            if not using_domain_randomization_config:
+                from isaaclab.managers import EventTermCfg
+
+                env_cfg.events.set_plate_white_tint = EventTermCfg(func=_set_plate_white_tint, mode="reset")
 
             env_cfg.viewer.eye = (-1.35, -1.30, 2.275)
             env_cfg.viewer.lookat = (0.15, 0.20, 0.775)
