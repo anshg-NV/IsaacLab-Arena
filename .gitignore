@@ -79,6 +79,9 @@ TAGS
 *datasets/
 
 /experiments/
+sim2real_*/
+report/
+*.usd
 
 # Training logs and outputs
 *wandb/
