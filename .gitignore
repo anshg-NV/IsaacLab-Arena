@@ -81,6 +81,7 @@ TAGS
 /experiments/
 sim2real_*/
 report/
+leapp_exports/
 *.usd
 
 # Training logs and outputs

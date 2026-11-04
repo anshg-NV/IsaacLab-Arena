@@ -121,6 +121,9 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
             device=self._device,
             verbose=True,
         )
+        self._camera_obs_keys = list(_RGB_OBS_KEYS)
+        if "robot_head_cam_depth" in self._policy.policy.obs_shapes:
+            self._camera_obs_keys.append("robot_head_cam_depth")
 
         algo_horizon = self._policy.policy.global_config.algo.get("horizon", {})
         self._frame_stack = max(1, int(algo_horizon.get("observation_horizon", 1)))
@@ -173,7 +176,7 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
         obs = {}
         for k in _LOW_DIM_OBS_KEYS:
             obs[k] = policy_obs[k].clone().float()
-        for k in _RGB_OBS_KEYS:
+        for k in self._camera_obs_keys:
             obs[k] = camera_obs[k].clone()
 
         num_envs = env.unwrapped.num_envs
@@ -216,12 +219,16 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
                 "right_eef_quat": InputKindEnum.BODY_ROTATION,
                 "right_wrist_pose_pelvis_frame": InputKindEnum.BODY_POSE,
                 "robot_head_cam_rgb": "observation/image/rgb",
+                "robot_head_cam_depth": "observation/image/depth",
             }
             Tp = self._policy.policy.algo_config.horizon.prediction_horizon
             action_dim = self._policy.policy.ac_dim
             noise = torch.randn((num_envs, Tp, action_dim), device=self._device)
 
             graph_name = self._env_graph_name(env)
+            from isaaclab_arena.evaluation.placement_regions import collect_placement_regions, write_placement_regions
+
+            placement_regions = collect_placement_regions(env.unwrapped, graph_name)
             leapp.start(name=graph_name)
             input_semantics = [
                 TensorSemantics(k, v, kind=obs_input_kind.get(k), element_names=_OBS_ELEMENT_NAMES.get(k))
@@ -251,7 +258,11 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
                 leapp.stop()
                 # Relax atol: validation runs the ONNX graph on CPU (ORT) vs the CUDA/PyTorch
                 # reference, which drifts ~1e-4 across the deep UNet x denoising -- negligible.
-                leapp.compile_graph(atol=1e-3)
+                validation_results = leapp.compile_graph(atol=1e-3)
+                assert validation_results == {graph_name: True}, "LEAPP numerical validation did not pass"
+                # LEAPP hides its informational validation logs when verbose=False.
+                print(f"LEAPP_VALIDATION_PASSED: {graph_name}", flush=True)
+                write_placement_regions(placement_regions, graph_name)
                 self._exported = True
             for action_sequence, env_id in zip(action_sequences, needs_trajectory):
                 self._action_queues[env_id].extend(action_sequence)

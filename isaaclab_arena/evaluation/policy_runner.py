@@ -136,7 +136,7 @@ def emit_final_metrics(
             "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
             "rank": local_rank,
             "world_size": world_size,
-            "checkpoint_path": getattr(args_cli, "robomimic_checkpoint", None),
+            "checkpoint_path": getattr(args_cli, "robomimic_checkpoint", None) or getattr(args_cli, "onnx_model_path", None),
             "num_episodes": args_cli.num_episodes,
             "output_dir": output_dir,
             "metrics": metrics,
@@ -152,6 +152,28 @@ def emit_final_metrics(
     results_path.parent.mkdir(parents=True, exist_ok=True)
     with open(results_path, "a", encoding="utf-8") as f:
         f.write(metrics_json + "\n")
+
+
+def emit_residual_correction_metrics(policy: PolicyBase, args_cli: argparse.Namespace, output_dir: str, env=None) -> None:
+    """Write an opt-in completed-rollout sidecar without changing aggregate evaluation records."""
+    summarize = getattr(policy, "evaluation_metrics", None)
+    metrics = summarize() if summarize is not None else None
+    if metrics is None or is_anonymous_run(args_cli):
+        return
+    assert get_world_size() == 1, "Residual correction sidecars require a single evaluation process"
+    record = {**metrics, "complete": True, "seed": args_cli.seed, "run": args_cli.run,
+              "requested_episodes": args_cli.num_episodes, "requested_steps": args_cli.num_steps}
+    if env is not None and "g1_action" in env.unwrapped.action_manager.active_terms:
+        action_term = env.unwrapped.action_manager.get_term("g1_action")
+        contract = getattr(action_term, "hand_target_contract", None)
+        if contract is not None:
+            record["deployment_hand_target_profile"] = contract
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "residual_corrections.json")
+    with open(path, "x", encoding="utf-8") as destination:
+        json.dump(record, destination, indent=2, allow_nan=False)
+        destination.write("\n")
+    print(f"RESIDUAL_CORRECTION_METRICS_JSON: {json.dumps(record, sort_keys=True, allow_nan=False)}", flush=True)
 
 
 def rollout_policy(
@@ -177,11 +199,17 @@ def rollout_policy(
 
         num_episodes_completed = 0
         num_steps_completed = 0
+        record_evaluation_step = getattr(policy, "record_evaluation_step", None)
+        record_native_step = getattr(policy, "record_native_step", None)
 
         while True:
             with torch.inference_mode():
                 actions = policy.get_action(env, obs)
                 obs, _, terminated, truncated, _ = env.step(actions)
+                if record_native_step is not None:
+                    record_native_step(env, (terminated | truncated).nonzero().flatten())
+                if record_evaluation_step is not None:
+                    record_evaluation_step()
 
                 if terminated.any() or truncated.any():
                     # Only reset policy for those envs that are terminated or truncated
@@ -308,7 +336,9 @@ def main():
             video_base_dir=output_dir,
         )
         env_name, env_cfg, env_kwargs = arena_builder.build_registered()
-        if args_cli.domain_randomization_config:
+        if args_cli.domain_randomization_config and anonymous_run:
+            print("[LEAPP export] Using default environment; domain-randomization config is not applied.")
+        if args_cli.domain_randomization_config and not anonymous_run:
             from isaac_autodata_interfaces.domain_randomization import apply_domain_randomization_from_yaml
 
             apply_domain_randomization_from_yaml(env_cfg, env_name, args_cli.domain_randomization_config, args_cli.num_envs)
@@ -345,6 +375,7 @@ def main():
         steps_str = f"{num_steps} steps" if num_steps is not None else f"{num_episodes} episodes"
         print(f"[Rank {local_rank}/{world_size}] Starting rollout ({steps_str})")
         metrics = rollout_policy(env, policy, num_steps, num_episodes)
+        emit_residual_correction_metrics(policy, args_cli, output_dir, env)
 
         if metrics is not None:
             metrics_plain = metrics_to_plain_python_types(metrics)
