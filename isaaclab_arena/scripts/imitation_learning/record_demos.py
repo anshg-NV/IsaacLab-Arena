@@ -36,6 +36,7 @@ optional arguments:
 
 # Standard library imports
 import contextlib
+from pathlib import Path
 from typing import Any
 
 # Isaac Lab AppLauncher
@@ -52,6 +53,11 @@ parser.add_argument(
     type=str,
     default=None,
     help="Optional AutoData domain-randomization YAML applied before environment creation.",
+)
+parser.add_argument(
+    "--asset_cache_dir",
+    type=Path,
+    help="Local mirror containing Assets/Isaac, used instead of NVIDIA's asset servers for this recording session.",
 )
 parser.add_argument("--step_hz", type=int, default=30, help="Environment stepping rate in Hz.")
 parser.add_argument(
@@ -77,6 +83,10 @@ add_example_environments_cli_args(parser)
 
 # parse the arguments
 args_cli = parser.parse_args()
+if args_cli.asset_cache_dir is not None:
+    args_cli.asset_cache_dir = args_cli.asset_cache_dir.expanduser().resolve()
+    if not (args_cli.asset_cache_dir / "Assets" / "Isaac").is_dir():
+        parser.error("--asset_cache_dir must contain the mirrored Assets/Isaac directory")
 
 app_launcher_args = vars(args_cli)
 
@@ -88,6 +98,16 @@ if "openxr" in args_cli.teleop_device.lower():
 # launch the simulator
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
+
+if args_cli.asset_cache_dir is not None:
+    import omni.client
+
+    for bucket in ("staging", "production"):
+        omni.client.set_alias(
+            f"https://omniverse-content-{bucket}.s3-us-west-2.amazonaws.com/",
+            args_cli.asset_cache_dir.as_uri() + "/",
+        )
+    print(f"[INFO]: Using local NVIDIA assets: {args_cli.asset_cache_dir}")
 
 # Patch isaaclab_physx's RTX render-update helper so the first frame's annotator
 # buffers are populated before the teleop loop renders. Without this the initial
