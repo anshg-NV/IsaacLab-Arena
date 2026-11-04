@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import MISSING, asdict, dataclass
+from pathlib import Path
 from typing import Literal
 
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
@@ -97,3 +98,14 @@ class AgileConfig(BaseConfig):
 
     policy_config_path: str = "config/g1_agile.yaml"
     """Policy related configuration to specify inputs/outputs dim"""
+
+
+@dataclass
+class AgileDeploymentConfig(BaseConfig):
+    """Velocity-only deployment export pinned to WBC-AGILE ad4ff6ee6b38da207592b3e71dcee4c118049f6d."""
+
+    wbc_version: Literal["agile_deployment"] = "agile_deployment"
+    wbc_model_path: str = str(Path(__file__).resolve().parents[1] / "models/agile_deployment/agile_velocity.onnx")
+    policy_config_path: str = "config/g1_agile_deployment.yaml"
+    memory_init_steps: int = 150
+    """Stationary prediction-feedback calls after each reset, without advancing physics."""

@@ -43,6 +43,12 @@ from isaaclab_arena_environments.cli import add_example_environments_cli_args, g
 # add argparse arguments
 parser = get_isaaclab_arena_cli_parser()
 parser.add_argument("--dataset_file", type=str, required=True, help="File path to export recorded demos.")
+parser.add_argument(
+    "--domain_randomization_config",
+    type=str,
+    default=None,
+    help="Optional AutoData domain-randomization YAML applied before environment creation.",
+)
 parser.add_argument("--step_hz", type=int, default=30, help="Environment stepping rate in Hz.")
 parser.add_argument(
     "--num_demos", type=int, default=1, help="Number of demonstrations to record. Set to 0 for infinite."
@@ -197,6 +203,20 @@ def create_environment_config(
     try:
         arena_builder = get_arena_builder_from_cli(args_cli)
         env_name, env_cfg, env_kwargs = arena_builder.build_registered()
+
+        if args_cli.domain_randomization_config:
+            from isaac_autodata_interfaces.domain_randomization import apply_domain_randomization_from_yaml
+
+            apply_domain_randomization_from_yaml(
+                env_cfg, env_name, args_cli.domain_randomization_config, env_cfg.scene.num_envs
+            )
+            if getattr(args_cli, "minimal_teleop_scene", False):
+                # Preserve the readable fixed lighting used by the minimal XR scene.
+                for event_name in ("create_light_boxes", "randomize_dome_light"):
+                    if hasattr(env_cfg.events, event_name):
+                        setattr(env_cfg.events, event_name, None)
+                print("[INFO]: Minimal teleop scene keeps fixed lighting; other configured DR remains enabled.")
+            print(f"[INFO]: Recording with domain randomization: {args_cli.domain_randomization_config}")
 
     except Exception as e:
         omni.log.error(f"Failed to parse environment configuration: {e}")

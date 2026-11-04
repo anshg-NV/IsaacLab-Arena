@@ -408,12 +408,12 @@ class G1DecoupledWBCPinkAction(G1DecoupledWBCJointAction):
                 self._processed_actions[:, sim_idx] = torch.as_tensor(ik_targets[:, full_idx], dtype=torch.float32, device=self.device)
 
     def apply_actions(self):
-        """Apply the computed joint positions based on the WBC solution."""
-        self._asset.set_joint_position_target(self._processed_actions, self._joint_ids)
+        """Use the shared joint-target application, including an opt-in hand-only ramp."""
+        super().apply_actions()
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         """Reset the action term for specified environments.
         Args:
             env_ids: A list of environment IDs to reset. If None, all environments are reset.
         """
-        self._raw_actions[env_ids] = torch.zeros(self.action_dim, device=self.device)
+        super().reset(env_ids)

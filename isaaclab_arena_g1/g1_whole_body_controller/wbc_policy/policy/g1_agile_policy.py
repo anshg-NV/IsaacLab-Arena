@@ -184,6 +184,12 @@ class G1AgilePolicy(WBCPolicy):
         action_offset = self.config.get("action_offset", [0.0] * self.num_actions)
         self._action_scale = np.array(action_scale, dtype=np.float32).reshape(1, -1)
         self._action_offset = np.array(action_offset, dtype=np.float32).reshape(1, -1)
+        # G1_29DOF training references: leg action offsets, zero for other body joints.
+        # The environment's reset posture may differ from this fixed ONNX input reference.
+        reference = dict(zip(self.config["controlled_joint_names"], action_offset))
+        self._joint_pos_reference = np.array(
+            [reference.get(name, 0.0) for name in self.config["onnx_input_joint_names"]], dtype=np.float32
+        ).reshape(1, -1)
         assert self._action_scale.shape == (
             1,
             self.num_actions,
@@ -261,12 +267,11 @@ class G1AgilePolicy(WBCPolicy):
         ang_vel_b = obs["root_ang_vel_b"].astype(np.float32)
         proj_grav = obs["projected_gravity_b"].astype(np.float32)
 
-        # Reorder WBC-ordered q/dq/default_q into the agile training order.
+        # Reorder WBC-ordered q/dq into the agile training order.
         q_agile = obs["q"][:, self.wbc_to_agile_input].astype(np.float32)
         dq_agile = obs["dq"][:, self.wbc_to_agile_input].astype(np.float32)
-        q_default_agile = obs["default_q"][:, self.wbc_to_agile_input].astype(np.float32)
 
-        joint_pos_rel = q_agile - q_default_agile
+        joint_pos_rel = q_agile - self._joint_pos_reference
         joint_vel_rel = dq_agile * self.joint_vel_scale
 
         flat_obs = np.concatenate(

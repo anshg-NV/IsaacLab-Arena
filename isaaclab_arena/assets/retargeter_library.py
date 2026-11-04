@@ -89,6 +89,13 @@ class G1WbcAgilePinkIsaacTeleopRetargeter(RetargetterBase):
 
 
 @register_retargeter
+class G1WbcAgileCuMotionIsaacTeleopRetargeter(G1WbcAgilePinkIsaacTeleopRetargeter):
+    """Reuse the G1 wrist-pose teleop pipeline with cuMotion arm control."""
+
+    embodiment = "g1_wbc_agile_cumotion"
+
+
+@register_retargeter
 class FrankaKeyboardRetargeter(RetargetterBase):
     device = "keyboard"
     embodiment = "franka_ik"

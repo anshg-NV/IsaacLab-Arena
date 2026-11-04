@@ -20,3 +20,5 @@ class G1DecoupledWBCJointActionCfg(ActionTermCfg):
     joint_names: list[str] = MISSING
 
     wbc_version: str = "homie_v2"
+    hand_target_profile: str = "current"
+    """Current direct targets, full_blend_ramp075, or opt-in episode_alternating_abrupt_ramp075 training mixture."""

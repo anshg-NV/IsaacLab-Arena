@@ -77,7 +77,7 @@ class RobomimicStandPolicyCfg(PolicyCfg):
     """Configuration for RobomimicStandPolicy."""
 
     robomimic_checkpoint: str
-    base_height: float = 0.78
+    base_height: float = 0.72
     device: str = "cuda:0"
     leapp_export: bool = False
 

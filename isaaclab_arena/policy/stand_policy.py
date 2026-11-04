@@ -16,7 +16,7 @@ from isaaclab_arena.policy.policy_base import PolicyBase, PolicyCfg
 class StandPolicyCfg(PolicyCfg):
     """Configuration for StandPolicy."""
 
-    base_height: float = 0.78
+    base_height: float = 0.72
 
 
 @register_policy

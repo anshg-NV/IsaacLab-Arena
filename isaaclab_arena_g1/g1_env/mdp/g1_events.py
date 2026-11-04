@@ -37,6 +37,16 @@ def reset_decoupled_wbc_pink_policy(env: ManagerBasedEnv, env_ids: torch.Tensor)
     env.action_manager.get_term("g1_action")._num_navigation_subgoals_reached = -1
 
 
+def reset_decoupled_wbc_cumotion_policy(env: ManagerBasedEnv, env_ids: torch.Tensor) -> None:
+    """Seed cuMotion from the randomized joints and reset AGILE for the selected environments."""
+    term = env.action_manager.get_term("g1_action")
+    term.seed_controllers_from_articulation(env_ids.tolist())
+    term.get_wbc_policy.lower_body_policy.reset(env_ids)
+    term._is_navigating = False
+    term._navigation_goal_reached = False
+    term._num_navigation_subgoals_reached = -1
+
+
 def apply_high_friction_to_g1_fingers(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,

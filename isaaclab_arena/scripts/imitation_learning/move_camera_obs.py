@@ -44,14 +44,15 @@ def move_camera_obs(file_path: str, key: str) -> None:
         print(f"Moved '{key}' from 'camera_obs' to 'obs' in {moved}/{len(demos)} demos.")
 
 
-def preprocess(input_file: str, key: str) -> str:
+def preprocess(input_file: str, key: str | list[str]) -> str:
     root, ext = os.path.splitext(input_file)
     output_file = f"{root}_preproc{ext}"
 
     shutil.copy2(input_file, output_file)
     print(f"Copied '{input_file}' -> '{output_file}'")
 
-    move_camera_obs(output_file, key)
+    for camera_key in [key] if isinstance(key, str) else key:
+        move_camera_obs(output_file, camera_key)
     return output_file
 
 
@@ -61,8 +62,9 @@ def main() -> None:
     parser.add_argument(
         "--key",
         type=str,
+        nargs="+",
         default="robot_head_cam_rgb",
-        help="Name of the dataset to move from 'camera_obs' to 'obs'.",
+        help="Camera keys to move from 'camera_obs' to 'obs' (for RGBD, pass both robot_head_cam_rgb and robot_head_cam_depth).",
     )
     args = parser.parse_args()
 

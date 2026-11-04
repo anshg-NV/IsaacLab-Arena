@@ -20,14 +20,16 @@ from isaaclab_arena.metrics.metric_base import MetricBase
 from isaaclab_arena.metrics.object_moved import ObjectMovedRateMetric
 from isaaclab_arena.metrics.success_rate import SuccessRateMetric
 from isaaclab_arena.tasks.task_base import TaskBase
-from isaaclab_arena.tasks.terminations import object_on_destination
+from isaaclab_arena.tasks.terminations import object_placed_on_target
 from isaaclab_arena.utils.cameras import get_viewer_cfg_look_at_object
 
 
 class HubblePickAndPlaceTask(TaskBase):
-    """Hubble Pick-and-place task. Success fires when the pick-up object contacts the destination
-    with low velocity. Failure (object_dropped) fires when the object falls below the
-    background's ``object_min_z``.
+    """Reference-derived apple placement, with bounds calibrated to the Hubble assets.
+
+    Success requires supported, settled apple-to-plate contact inside the live plate's
+    footprint with both hands clear. Height margins use this scene's support surface
+    [m], preserving its intentional elevation. Failure (object_dropped) is unchanged.
 
     The default Mimic cfg is ``HubblePickAndPlaceMimicEnvCfg``. Pass
     ``mimic_env_cfg_factory`` to inject a custom ``MimicEnvCfg`` instead:
@@ -45,9 +47,11 @@ class HubblePickAndPlaceTask(TaskBase):
         destination_object: Asset | None = None,
         episode_length_s: float | None = None,
         task_description: str | None = None,
-        force_threshold: float = 1.0,
+        force_threshold: float = 0.5,
         velocity_threshold: float = 0.1,
         mimic_env_cfg_factory: Callable[[ArmMode], MimicEnvCfg] | None = None,
+        *,
+        support_surface_z: float,
     ):
         super().__init__(episode_length_s=episode_length_s)
         self.pick_up_object = pick_up_object
@@ -61,6 +65,9 @@ class HubblePickAndPlaceTask(TaskBase):
         )
         self.force_threshold = force_threshold
         self.velocity_threshold = velocity_threshold
+        self.support_surface_z = support_surface_z
+        self.object_center_offset_m = tuple(float(value) for value in pick_up_object.get_bounding_box().center[0])
+        self.target_center_offset_m = tuple(float(value) for value in destination_location.get_bounding_box().center[0])
         self.mimic_env_cfg_factory = mimic_env_cfg_factory
         self.events_cfg = None
         self.termination_cfg = self.make_termination_cfg()
@@ -78,12 +85,28 @@ class HubblePickAndPlaceTask(TaskBase):
 
     def make_termination_cfg(self):
         success = TerminationTermCfg(
-            func=object_on_destination,
+            func=object_placed_on_target,
             params={
                 "object_cfg": SceneEntityCfg(self.pick_up_object.name),
+                "target_cfg": SceneEntityCfg(self.destination_location.name),
+                "robot_cfg": SceneEntityCfg("robot"),
                 "contact_sensor_cfg": SceneEntityCfg("pick_up_object_contact_sensor"),
-                "force_threshold": self.force_threshold,
-                "velocity_threshold": self.velocity_threshold,
+                # User-selected center tolerance permits partial apple overhang at the rim.
+                # Correct both off-center roots using their rotated, scaled local bounds centers.
+                "placement_radius_m": 0.09,
+                "object_center_offset_m": self.object_center_offset_m,
+                "target_center_offset_m": self.target_center_offset_m,
+                # Apple root is 22–60 mm above its bottom as it rolls; basin adds ~6–12 mm.
+                "placement_z_m": 0.08,
+                "min_object_height_above_target_m": 0.015,
+                "max_object_height_m": self.support_surface_z + 0.085,
+                "min_object_height_m": self.support_surface_z + 0.015,
+                "min_target_height_m": self.support_surface_z - 0.01,
+                "max_target_height_m": self.support_surface_z + 0.01,
+                "min_contact_force": self.force_threshold,
+                "max_object_speed": self.velocity_threshold,
+                "release_clearance_m": 0.10,
+                "task_link_names": ("left_hand_thumb_2_link", "right_hand_thumb_2_link"),
             },
         )
         object_dropped = TerminationTermCfg(

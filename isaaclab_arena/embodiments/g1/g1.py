@@ -3,6 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import math
 import torch
 from collections.abc import Sequence
@@ -35,6 +36,7 @@ from isaaclab_arena.terms.events import reset_all_articulation_joints
 from isaaclab_arena.utils.pose import Pose
 from isaaclab_arena_g1.g1_env.mdp import g1_events as g1_events_mdp
 from isaaclab_arena_g1.g1_env.mdp import g1_observations as g1_observations_mdp
+from isaaclab_arena_g1.g1_env.mdp.actions.g1_decoupled_wbc_cumotion_action_cfg import G1DecoupledWBCCuMotionActionCfg
 from isaaclab_arena_g1.g1_env.mdp.actions.g1_decoupled_wbc_joint_action_cfg import G1DecoupledWBCJointActionCfg
 from isaaclab_arena_g1.g1_env.mdp.actions.g1_decoupled_wbc_pink_action_cfg import G1DecoupledWBCPinkActionCfg
 
@@ -209,6 +211,34 @@ class G1WBCAgilePinkEmbodiment(G1EmbodimentBase):
 
 
 @register_asset
+class G1WBCAgileCuMotionEmbodiment(G1WBCAgilePinkEmbodiment):
+    """G1 with AGILE balance and arms-only cuMotion RMPFlow wrist tracking."""
+
+    name = "g1_wbc_agile_cumotion"
+
+    def __init__(
+        self,
+        enable_cameras: bool = False,
+        initial_pose: Pose | None = None,
+        camera_offset: Pose | None = _DEFAULT_G1_CAMERA_OFFSET,
+        use_tiled_camera: bool = False,
+        lock_waist: bool = True,
+    ):
+        assert lock_waist, "The cuMotion arms-only XRDF requires a locked waist."
+        super().__init__(enable_cameras, initial_pose, camera_offset, use_tiled_camera, lock_waist)
+        self.action_config.g1_action = G1DecoupledWBCCuMotionActionCfg(
+            asset_name="robot",
+            joint_names=[".*"],
+            wbc_version="agile",
+            upperbody_active_joint_groups=["arms"],
+            upperbody_extra_active_joints=[],
+        )
+        self.event_config.reset_wbc_policy = EventTerm(
+            func=g1_events_mdp.reset_decoupled_wbc_cumotion_policy, mode="reset"
+        )
+
+
+@register_asset
 class G1WBCAgileJointEmbodiment(G1EmbodimentBase):
     """Embodiment for the G1 robot with AGILE WBC policy and direct joint upperbody control.
 
@@ -266,33 +296,38 @@ G1_CFG = ArticulationCfg(
     ),
     prim_path="/World/envs/env_.*/Robot",
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.8, -1.38, 0.78),
+        pos=(0.8, -1.38, 0.72),
         rot=(0.0, 0.0, 1.0, 0.0),
         joint_pos={
-            # target angles [rad]
-            "left_hip_pitch_joint": -0.1,
-            "left_hip_roll_joint": 0.0,
-            "left_hip_yaw_joint": 0.0,
-            "left_knee_joint": 0.3,
-            "left_ankle_pitch_joint": -0.2,
-            "left_ankle_roll_joint": 0.0,
-            "right_hip_pitch_joint": -0.1,
-            "right_hip_roll_joint": 0.0,
-            "right_hip_yaw_joint": 0.0,
-            "right_knee_joint": 0.3,
-            "right_ankle_pitch_joint": -0.2,
-            "right_ankle_roll_joint": 0.0,
-            "waist_yaw_joint": 0.0,
-            "waist_roll_joint": 0.0,
-            "waist_pitch_joint": 0.0,
-            "left_shoulder_pitch_joint": 0.0,
-            "left_shoulder_roll_joint": 0.0,
-            "left_shoulder_yaw_joint": 0.0,
-            "left_elbow_joint": 0.0,
-            "right_shoulder_pitch_joint": 0.0,
-            "right_shoulder_roll_joint": 0,
-            "right_shoulder_yaw_joint": 0.0,
-            "right_elbow_joint": 0.0,
+            "left_hip_pitch_joint": -0.487908155,
+            "left_hip_roll_joint": 0.105708323,
+            "left_hip_yaw_joint": -0.069303058,
+            "left_knee_joint": 0.891626298,
+            "left_ankle_pitch_joint": -0.435163945,
+            "left_ankle_roll_joint": -0.102285109,
+            "right_hip_pitch_joint": -0.462256581,
+            "right_hip_roll_joint": -0.151676610,
+            "right_hip_yaw_joint": 0.028672049,
+            "right_knee_joint": 0.889555454,
+            "right_ankle_pitch_joint": -0.436734796,
+            "right_ankle_roll_joint": 0.119133085,
+            "waist_yaw_joint": 0.001968609,
+            "waist_roll_joint": -0.000887207,
+            "waist_pitch_joint": -0.014176485,
+            "left_shoulder_pitch_joint": 0.026940538,
+            "left_shoulder_roll_joint": 0.224680260,
+            "left_shoulder_yaw_joint": 0.492911190,
+            "left_elbow_joint": 0.025885927,
+            "right_shoulder_pitch_joint": 0.025790052,
+            "right_shoulder_roll_joint": -0.227172971,
+            "right_shoulder_yaw_joint": -0.491377205,
+            "right_elbow_joint": 0.027803402,
+            "left_wrist_roll_joint": -0.002528672,
+            "left_wrist_pitch_joint": 0.007178551,
+            "left_wrist_yaw_joint": -0.001773665,
+            "right_wrist_roll_joint": -0.001965413,
+            "right_wrist_pitch_joint": 0.008736501,
+            "right_wrist_yaw_joint": 0.000323574,
         },
         joint_vel={".*": 0.0},
     ),
@@ -870,6 +905,43 @@ class G1WBCPinkEventCfg:
 class G1MimicEnv(ManagerBasedRLMimicEnv):
     """Configuration for G1 Mimic."""
 
+    async def settle_before_datagen(self, env_id: int, env_action_queue: asyncio.Queue) -> None:
+        """Balance at the reset posture before recording or planning a generated trajectory.
+
+        Args:
+            env_id: Environment to settle, independently of other ongoing trajectories.
+            env_action_queue: Queue consumed by the shared simulation stepping loop.
+        """
+        seconds = getattr(self.cfg, "datagen_settle_time_s", 0.0)
+        assert seconds >= 0.0
+        if seconds == 0.0:
+            return
+        assert env_action_queue is not None, "Datagen settling requires the shared action queue"
+        action = torch.zeros(self.action_space.shape[-1], device=self.device)
+        action[-4] = 0.72  # Legacy height channel; the deployment AGILE export is velocity-only.
+        term = self.action_manager.get_term("g1_action")
+        if hasattr(term, "upperbody_controllers"):
+            for side, position, quaternion in (
+                ("left", slice(2, 5), slice(5, 9)),
+                ("right", slice(9, 12), slice(12, 16)),
+            ):
+                action[position] = self.obs_buf["policy"][f"{side}_eef_pos"][env_id]
+                action[quaternion] = self.obs_buf["policy"][f"{side}_eef_quat"][env_id]
+        else:
+            action[:term.num_joints] = self.scene["robot"].data.joint_pos.torch[env_id]
+
+        ids = [env_id]
+        self.recorder_manager.set_recording_enabled(False, env_ids=ids)
+        self.recorder_manager.reset(env_ids=ids)
+        try:
+            for _ in range(math.ceil(seconds / self.step_dt)):
+                await env_action_queue.put((env_id, action))
+                await env_action_queue.join()
+        finally:
+            self.recorder_manager.set_recording_enabled(True, env_ids=ids)
+        # Capture the settled joints/root/objects without resetting physics, DR, or AGILE memory.
+        self.recorder_manager.record_post_reset(env_ids=ids)
+
     def get_robot_eef_pose(self, eef_name: str, env_ids: Sequence[int] | None = None) -> torch.Tensor:
         """
         Get current robot end effector pose. Should be the same frame as used by the robot end-effector controller.
@@ -920,8 +992,8 @@ class G1MimicEnv(ManagerBasedRLMimicEnv):
         target_right_eef_rot_quat = PoseUtils.quat_from_matrix(right_target_rot)
 
         # gripper actions
-        left_gripper_action = gripper_action_dict["left"].unsqueeze(0)
-        right_gripper_action = gripper_action_dict["right"].unsqueeze(0)
+        left_gripper_action = gripper_action_dict["left"].reshape(1)
+        right_gripper_action = gripper_action_dict["right"].reshape(1)
 
         # body gripper action is lower body control commands (nav_cmd, base_height_cmd, torso_orientation_rpy_cmd)
         body_gripper_action = gripper_action_dict["body"]
