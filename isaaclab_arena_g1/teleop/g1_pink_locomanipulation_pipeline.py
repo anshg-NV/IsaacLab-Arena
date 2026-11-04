@@ -46,6 +46,8 @@ def _build_g1_pink_locomanipulation_pipeline():
     Returns:
         OutputCombiner with a single "action" output (23D flattened tensor).
     """
+    import numpy as np
+
     from isaacteleop.retargeters import (
         LocomotionRootCmdRetargeter,
         LocomotionRootCmdRetargeterConfig,
@@ -57,7 +59,28 @@ def _build_g1_pink_locomanipulation_pipeline():
     )
     from isaacteleop.retargeting_engine.deviceio_source_nodes import ControllersSource
     from isaacteleop.retargeting_engine.interface import OutputCombiner, ValueInput
-    from isaacteleop.retargeting_engine.tensor_types import TransformMatrix
+    from isaacteleop.retargeting_engine.interface.tensor_group import OptionalTensorGroup
+    from isaacteleop.retargeting_engine.tensor_types import ControllerInputIndex, TransformMatrix
+
+    class ControllerSe3AbsRetargeter(Se3AbsRetargeter):
+        """Treat invalid grip samples as tracking loss, holding the last wrist pose."""
+
+        def _compute_fn(self, inputs, outputs, context):
+            device_name = self._config.input_device
+            controller = inputs[device_name]
+            if not controller.is_none:
+                position = np.from_dlpack(controller[ControllerInputIndex.GRIP_POSITION])
+                orientation = np.from_dlpack(controller[ControllerInputIndex.GRIP_ORIENTATION])
+                if (
+                    not controller[ControllerInputIndex.GRIP_IS_VALID]
+                    or not np.isfinite(position).all()
+                    or not np.isfinite(orientation).all()
+                    or np.linalg.norm(orientation) < 1e-6
+                ):
+                    # Use the SDK's absent-input/reset behavior without changing
+                    # the controller data shared with the hand/button retargeters.
+                    inputs = {**inputs, device_name: OptionalTensorGroup(controller.group_type)}
+            super()._compute_fn(inputs, outputs, context)
 
     controllers = ControllersSource(name="controllers")
     transform_input = ValueInput("world_T_anchor", TransformMatrix())
@@ -76,7 +99,7 @@ def _build_g1_pink_locomanipulation_pipeline():
         target_offset_pitch=180.0,
         target_offset_yaw=-90.0,
     )
-    left_se3 = Se3AbsRetargeter(left_se3_cfg, name="left_ee_pose")
+    left_se3 = ControllerSe3AbsRetargeter(left_se3_cfg, name="left_ee_pose")
     connected_left_se3 = left_se3.connect(
         {ControllersSource.LEFT: transformed_controllers.output(ControllersSource.LEFT)}
     )
@@ -90,7 +113,7 @@ def _build_g1_pink_locomanipulation_pipeline():
         target_offset_pitch=0.0,
         target_offset_yaw=90.0,
     )
-    right_se3 = Se3AbsRetargeter(right_se3_cfg, name="right_ee_pose")
+    right_se3 = ControllerSe3AbsRetargeter(right_se3_cfg, name="right_ee_pose")
     connected_right_se3 = right_se3.connect(
         {ControllersSource.RIGHT: transformed_controllers.output(ControllersSource.RIGHT)}
     )
