@@ -215,6 +215,7 @@ def main():
                 async_components["action_queue"],
                 async_components["info_pool"],
                 async_components["event_loop"],
+                data_gen_tasks=data_gen_tasks,
             )
         except asyncio.CancelledError:
             print("Tasks were cancelled.")
