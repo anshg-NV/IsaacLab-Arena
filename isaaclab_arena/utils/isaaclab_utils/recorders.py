@@ -3,9 +3,38 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import time
+import torch
+
 from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
 from isaaclab.managers import RecorderTerm, RecorderTermCfg
 from isaaclab.utils import configclass
+
+
+class PreStepTimestampsRecorder(RecorderTerm):
+    """Record host clocks alongside each pre-step action and observation sample.
+
+    Each ``timestamps`` field becomes an int64 array of shape (T,) per episode.
+    ``unix_ns`` is time since the Unix epoch [ns]; ``monotonic_ns`` has an arbitrary
+    origin and should be differenced to measure sample intervals [ns]. These mark
+    recorder sampling, not camera exposure or the later episode flush to disk.
+    """
+
+    def record_pre_step(self) -> tuple[str, dict[str, torch.Tensor]]:
+        """Return one pair of host timestamps per environment for this recorded step."""
+        unix_ns = time.time_ns()
+        monotonic_ns = time.monotonic_ns()
+        return "timestamps", {
+            "unix_ns": torch.full((self._env.num_envs,), unix_ns, dtype=torch.int64, device="cpu"),
+            "monotonic_ns": torch.full((self._env.num_envs,), monotonic_ns, dtype=torch.int64, device="cpu"),
+        }
+
+
+@configclass
+class PreStepTimestampsRecorderCfg(RecorderTermCfg):
+    """Configuration for recording per-sample host timestamps."""
+
+    class_type: type[RecorderTerm] = PreStepTimestampsRecorder
 
 
 class PreStepFlatCameraObservationsRecorder(RecorderTerm):

@@ -14,6 +14,10 @@ This script allows users to record demonstrations operated by human teleoperatio
 The recorded demonstrations are stored as episodes in a hdf5 file. Users can specify the task, teleoperation
 device, dataset directory, and environment stepping rate through command-line arguments.
 
+Each trajectory includes ``timestamps/unix_ns`` and ``timestamps/monotonic_ns`` arrays
+aligned with its actions. These int64 host timestamps mark pre-step recording, not
+simulation time or HDF5 flushing. Difference monotonic timestamps to measure sample intervals.
+
 required arguments:
     --task                    Name of the task.
 
@@ -118,7 +122,7 @@ from isaaclab.managers import DatasetExportMode
 from isaaclab_mimic.ui.instruction_display import InstructionDisplay, show_subtask_instructions
 from isaaclab_teleop import IsaacTeleopCfg, create_isaac_teleop_device, remove_camera_configs
 
-from isaaclab_arena.utils.isaaclab_utils.recorders import ArenaEnvRecorderManagerCfg
+from isaaclab_arena.utils.isaaclab_utils.recorders import ArenaEnvRecorderManagerCfg, PreStepTimestampsRecorderCfg
 
 # Imports have to follow simulation startup.
 
@@ -248,6 +252,7 @@ def create_environment_config(
         env_cfg.recorders = ArenaEnvRecorderManagerCfg()
     else:
         env_cfg.recorders = ActionStateRecorderManagerCfg()
+    env_cfg.recorders.record_pre_step_timestamps = PreStepTimestampsRecorderCfg()
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
     env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_SUCCEEDED_ONLY
