@@ -64,7 +64,7 @@ def _feedback_contract(config: LeappOnnxStandPolicyCfg) -> dict | None:
 
 @register_policy
 class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
-    """Run the exported final 23-D action directly, without a second residual or assembly."""
+    """Consume exported standing action chunks and threshold grippers before execution."""
 
     name = "leapp_onnx_stand"
 
@@ -83,7 +83,7 @@ class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
         assert model_path.is_file(), f"Missing ONNX graph: {model_path}"
         model = onnx.load(str(model_path), load_external_data=False)
         assert [output.name for output in model.graph.output] == ["action"], (
-            "This consumer requires the assembled action output, not a raw base chunk"
+            "This consumer requires the action output"
         )
         locations = {
             entry.value for initializer in model.graph.initializer for entry in initializer.external_data
@@ -129,7 +129,7 @@ class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
         outputs = self._session.get_outputs()
         assert len(outputs) == 1 and tuple(outputs[0].shape) == (1, 6, 23)
         assert outputs[0].type == "tensor(float)"
-        assert outputs[0].name == "action", "Runtime output differs from the assembled action graph"
+        assert outputs[0].name == "action", "Runtime output differs from the action graph"
         self._output_name = outputs[0].name
         self._provenance = {
             "policy_type": self.name,
@@ -143,7 +143,7 @@ class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
                 "cpu_shape_operator_placement_allowed": True,
             },
             "input_contract": "Seven raw observations stacked twice plus fresh initial diffusion noise",
-            "output_contract": "Six final 23-D actions consumed directly; no extra assembly or residual correction",
+            "output_contract": "Six 23-D actions with fixed standing commands; grippers thresholded after dequeue",
         }
         if self._feedback_contract is not None:
             self._provenance["input_contract"] += " plus one immutable causal20 packet at actual submission"
@@ -220,6 +220,9 @@ class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
         else:
             action = self._timing.consume(self._queues)
             self._timing.advance()
+        # Preserve continuous gripper values in queued actions; threshold only this command.
+        action = action.clone()
+        action[:, :2] = torch.where(action[:, :2] < -0.25, -0.5, 0.0)
         if self._native_feedback is not None:
             self._native_feedback.prepare_step(action[:, :2], global_tick=self._feedback_tick)
         self._pending_camera = camera_stats.detach().cpu()
@@ -268,7 +271,7 @@ class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
             "component_count": None, "sum_squared_mm2": None, "saturation_count": None,
             "saturation_threshold_mm": None, "saturation_frequency": None,
             "definition": (
-                "Correction RMS is unavailable: the full graph exposes final actions, not its base/residual split."
+                "Correction RMS is unavailable: the graph exposes actions, not its base/residual split."
             ),
             "camera_validity": {
                 "frame_count": len(self._camera_stats), "all_finite": True, "all_nonblank": True,
