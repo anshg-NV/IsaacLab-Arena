@@ -18,6 +18,7 @@ from rsl_rl.modules.distribution import GaussianDistribution
 from tensordict import TensorDict
 
 from isaaclab_arena.policy.residual_observation import RESIDUAL_FEATURE_DIMS, residual_mode_from_config
+from isaaclab_arena.policy.residual_joint_policy import ResidualJointPolicy, joint_residual_network
 from robomimic.models.feedback_residual_policy_nets import (
     FeedbackResidualPolicy, MODEL_TYPE, _check_state, _same_record, write_export_binding,
 )
@@ -56,8 +57,9 @@ class ResidualRslModel(MLPModel):
     """Expose the established residual actor or critic through RSL-RL's model API.
 
     Inputs concatenate frozen features and the complete uncorrected action chunk.
-    RSL-RL samples raw Gaussian corrections; the environment applies the bounded
-    translation. Observation normalization must remain disabled for chunk equivalence.
+    RSL-RL samples raw Gaussian corrections; the environment applies bounded
+    wrist translations or joint/gripper corrections. Observation normalization must
+    remain disabled for chunk equivalence.
     """
 
     def __init__(
@@ -76,6 +78,7 @@ class ResidualRslModel(MLPModel):
         feedback_enabled: bool | None = None,
         feedback_contract: dict | None = None,
         feedback_auxiliary_seed: int = 29451,
+        action_space: str = "eef",
     ) -> None:
         assert obs_set in ("actor", "critic")
         initialization = (actor_init_checkpoint, actor_init_sha256, actor_init_base_sha256)
@@ -85,7 +88,9 @@ class ResidualRslModel(MLPModel):
         assert obs_set == "actor" or actor_init_checkpoint is None, "Actor initialization cannot initialize a critic"
         assert tuple(hidden_dims) == (128, 128) and activation == "tanh"
         assert not obs_normalization, "Residual observation normalization must stay disabled"
-        assert output_dim == (6 if obs_set == "actor" else 1)
+        assert action_space in ("eef", "joint")
+        assert output_dim == ((16 if action_space == "joint" else 6) if obs_set == "actor" else 1)
+        assert action_space == "eef" or feedback_enabled is None, "Causal20 feedback is specific to wrist residuals"
         assert feedback_enabled is None or type(feedback_enabled) is bool, "Explicit matched bool or None required"
         assert feedback_enabled is not None or (feedback_contract is None and feedback_auxiliary_seed == 29451), (
             "Feedback configuration requires explicit matched mode"
@@ -111,16 +116,20 @@ class ResidualRslModel(MLPModel):
                 "feedback_contract": deepcopy(compact.contract),
             }
             return
-        feature_dim = self.obs_dim - 6 * 23
-        assert feature_dim in RESIDUAL_FEATURE_DIMS.values(), (
-            "Expected frozen 220-D visual or 92-D blind features followed by the 6x23 base chunk"
-        )
+        if action_space == "eef":
+            feature_dim = self.obs_dim - 6 * 23
+            assert (
+                feature_dim in RESIDUAL_FEATURE_DIMS.values()
+            ), "Expected frozen 220-D visual or 92-D blind features followed by the 6x23 base chunk"
         if obs_set == "actor":
             assert isinstance(self.distribution, GaussianDistribution) and self.distribution.std_type == "log"
         else:
             assert self.distribution is None
-        compact = ResidualWristPolicy(**{**RESIDUAL_CONFIG, "feature_dim": feature_dim})
-        self.mlp = compact.actor if obs_set == "actor" else compact.critic
+        if action_space == "joint":
+            self.mlp = joint_residual_network(self.obs_dim, output_dim)
+        else:
+            compact = ResidualWristPolicy(**{**RESIDUAL_CONFIG, "feature_dim": feature_dim})
+            self.mlp = compact.actor if obs_set == "actor" else compact.critic
         self.actor_initialization = None
         if actor_init_checkpoint is not None:
             checkpoint_path = Path(actor_init_checkpoint).resolve(strict=True)
@@ -128,6 +137,10 @@ class ResidualRslModel(MLPModel):
             payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
             assert payload["format_version"] == 1
             assert payload["base_sha256"] == actor_init_base_sha256, "Actor/base checkpoint SHA-256 mismatch"
+            if action_space == "joint":
+                with torch.random.fork_rng(devices=[]), torch.device("cpu"):
+                    compact = ResidualJointPolicy(**payload["config"])
+                assert compact.config["feature_dim"] + compact.config["horizon"] * 16 == self.obs_dim
             assert payload["config"] == compact.config, "Actor initialization configuration mismatch"
             state = {key.removeprefix("actor."): value for key, value in payload["state_dict"].items()
                      if key.startswith("actor.")}
@@ -138,8 +151,7 @@ class ResidualRslModel(MLPModel):
                     f"Actor initialization shape/dtype mismatch: {key}"
                 )
                 assert torch.isfinite(value).all(), f"Non-finite actor initialization parameter: {key}"
-            # No extra model construction: loading only existing parameters preserves the RNG stream,
-            # freshly initialized critic, configured Gaussian scale and subsequently created optimizer.
+            # Initialize only the actor, retaining the fresh critic and configured Gaussian scale.
             self.mlp.load_state_dict(state, strict=True)
             self.actor_initialization = {
                 "mode": "actor_only", "checkpoint": str(checkpoint_path),
@@ -219,15 +231,21 @@ def export_residual_checkpoint(
     if "model_type" in context:
         return _export_feedback_checkpoint(checkpoint_path, output, base, context, context_file)
     config = context["config"]
-    assert config in [{**RESIDUAL_CONFIG, "feature_dim": size} for size in RESIDUAL_FEATURE_DIMS.values()], (
-        "Residual configuration mismatch"
-    )
-    input_mode = residual_mode_from_config(config)
+    action_space = context.get("action_space", "eef")
+    assert action_space in ("eef", "joint")
+    if action_space == "joint":
+        model = ResidualJointPolicy(**config)
+        input_mode = config["input_mode"]
+    else:
+        assert config in [
+            {**RESIDUAL_CONFIG, "feature_dim": size} for size in RESIDUAL_FEATURE_DIMS.values()
+        ], "Residual configuration mismatch"
+        input_mode = residual_mode_from_config(config)
+        model = ResidualWristPolicy(**config)
     assert context.get("input_mode", "vision") == input_mode, "Residual input mode mismatch"
     base_sha = checkpoint_sha256(base)
     assert context["base_sha256"] == base_sha, "Residual/base checkpoint SHA-256 mismatch"
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    model = ResidualWristPolicy(**context["config"])
     state = {}
     for role in ("actor", "critic"):
         for key, value in payload[f"{role}_state_dict"].items():
@@ -247,6 +265,7 @@ def export_residual_checkpoint(
             "source_checkpoint": str(checkpoint_path.resolve()),
             "source_iteration": payload.get("iter"),
             "input_mode": input_mode,
+            "action_space": action_space,
             "training_timing_profile": context.get("timing_profile", "instant"),
             "training_variance_noise_seed": context.get("variance_noise_seed"),
             "training_diffusion_contract": context.get("diffusion_contract"),

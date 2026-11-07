@@ -29,18 +29,6 @@ from isaaclab_arena.policy.residual_observation import residual_features, residu
 #   [19]    base height cmd  (== index -4)
 #   [20:23] torso orientation rpy cmd
 
-# Must match the low_dim / rgb obs keys in the robomimic training config.
-_LOW_DIM_OBS_KEYS = [
-    "left_eef_pos",
-    "left_eef_quat",
-    "left_wrist_pose_pelvis_frame",
-    "right_eef_pos",
-    "right_eef_quat",
-    "right_wrist_pose_pelvis_frame",
-    "robot_joint_pos",
-]
-_RGB_OBS_KEYS = ["robot_head_cam_rgb"]
-
 # Per-element labels only where the layout is unambiguous (xyz positions). Quaternions,
 # 4x4 pose matrices, and the image tensor are left unlabeled.
 _OBS_ELEMENT_NAMES = {
@@ -127,6 +115,11 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
     """
 
     name = "robomimic_stand"
+    action_space = "eef"
+
+    action_element_names = _ACTION_ELEMENT_NAMES
+    action_kind = "command/g1_wbc_pink_action"
+    obs_element_names = _OBS_ELEMENT_NAMES
 
     def __init__(self, config: RobomimicStandPolicyCfg):
         """
@@ -205,10 +198,9 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
             device=self._device,
             verbose=True,
         )
-        self._camera_obs_keys = list(_RGB_OBS_KEYS)
-        if "robot_head_cam_depth" in self._policy.policy.obs_shapes:
-            self._camera_obs_keys.append("robot_head_cam_depth")
-
+        obs_modalities = self._policy.policy.global_config.observation.modalities.obs
+        self._low_dim_obs_keys = list(obs_modalities.get("low_dim", []))
+        self._camera_obs_keys = list(obs_modalities.get("rgb", [])) + list(obs_modalities.get("depth", []))
 
         self._residual = None
         if config.residual_model_path:
@@ -227,11 +219,21 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
                     feedback_enabled=config.feedback_enabled,
                 ).to(self._device)
             else:
-                self._residual = ResidualWristPolicy.load(
+                residual_type = ResidualWristPolicy
+                if self.action_space == "joint":
+                    from isaaclab_arena.policy.residual_joint_policy import ResidualJointPolicy
+
+                    residual_type = ResidualJointPolicy
+                self._residual = residual_type.load(
                     config.residual_model_path, self._device, checkpoint_sha256(self._checkpoint_path)
                 )
             # Evaluation/export use the checkpoint's contract, never a separate blind flag.
-            self._residual_input_mode = "vision" if config.feedback_contract is not None else residual_mode_from_config(self._residual.config)
+            if self.action_space == "joint":
+                self._residual_input_mode = self._residual.config["input_mode"]
+            elif config.feedback_contract is not None:
+                self._residual_input_mode = "vision"
+            else:
+                self._residual_input_mode = residual_mode_from_config(self._residual.config)
             if self._record_residual_metrics:
                 assert self._residual.config["max_translation"] == 0.04, "Evaluation metrics require the 40 mm bound"
 
@@ -266,6 +268,10 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
         spec = env.unwrapped.spec
         return spec.id if spec is not None else self.name
 
+    def _prepare_action_chunk(self, actions: torch.Tensor) -> torch.Tensor:
+        """Restore physical action units before residual inputs and corrections are formed."""
+        return actions
+
     def _assemble_action(self, dp: torch.Tensor) -> torch.Tensor:
         """Turn a diffusion-policy output ``(..., ac_dim)`` into the 23-dim WBC action ``(..., 23)``.
 
@@ -273,6 +279,7 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
         WBC controller expects) + fixed lower-body stand commands (navigate=0, base_height, torso=0).
         Operates on the last dim, so it works for a single action ``(N, 23)`` or a chunk ``(N, Ta, 23)``.
         """
+        assert dp.shape[-1] == 23, "End-effector policies require 23-D absolute actions"
         grippers = dp[..., :2]
         grippers = torch.where(
             grippers < -0.25,
@@ -284,6 +291,11 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
         base_height_cmd = torch.full_like(dp[..., :1], self._base_height)
         torso_rpy_cmd = torch.zeros_like(dp[..., :3])
         return torch.cat([arm, navigate_cmd, base_height_cmd, torso_rpy_cmd], dim=-1)
+
+    def _export_action_chunk(self, actions: torch.Tensor) -> torch.Tensor:
+        """Export fixed standing commands with continuous grippers for downstream corrections."""
+        assembled = self._assemble_action(actions)
+        return torch.cat([actions[..., :2], assembled[..., 2:]], dim=-1)
 
     def get_action(self, env: gym.Env, observation: GymSpacesDict) -> torch.Tensor:
         if self._native_feedback is not None:
@@ -298,7 +310,7 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
         camera_obs = observation.get("camera_obs", {})
 
         obs = {}
-        for k in _LOW_DIM_OBS_KEYS:
+        for k in self._low_dim_obs_keys:
             obs[k] = policy_obs[k].clone().float()
         for k in self._camera_obs_keys:
             obs[k] = camera_obs[k].clone()
@@ -376,6 +388,9 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
                 "right_eef_pos": InputKindEnum.BODY_POSITION,
                 "right_eef_quat": InputKindEnum.BODY_ROTATION,
                 "right_wrist_pose_pelvis_frame": InputKindEnum.BODY_POSE,
+                "robot_joint_pos": InputKindEnum.JOINT_POSITION,
+                "left_arm_joint_pos": InputKindEnum.JOINT_POSITION,
+                "right_arm_joint_pos": InputKindEnum.JOINT_POSITION,
                 "robot_head_cam_rgb": "observation/image/rgb",
                 "robot_head_cam_depth": "observation/image/depth",
             }
@@ -389,7 +404,7 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
             placement_regions = collect_placement_regions(env.unwrapped, graph_name)
             leapp.start(name=graph_name)
             input_semantics = [
-                TensorSemantics(k, v, kind=obs_input_kind.get(k), element_names=_OBS_ELEMENT_NAMES.get(k))
+                TensorSemantics(k, v, kind=obs_input_kind.get(k), element_names=self.obs_element_names.get(k))
                 for k, v in stacked_obs.items()
             ]
             input_semantics.append(TensorSemantics("diffusion_noise", noise, kind="noise/gaussian"))
@@ -412,9 +427,12 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
             action_sequences = self._policy.policy._get_action_trajectory(
                 obs_dict=sub_obs, noise=sub_noise, **variance_args
             )  # (n, Ta, Da)
+            action_sequences = self._prepare_action_chunk(action_sequences)
             inputs = None
             if self._residual is not None or self._cache_residual_inputs:
-                features = residual_features(self._policy.policy, sub_obs, self._residual_input_mode)
+                features = residual_features(
+                    self._policy.policy, sub_obs, self._residual_input_mode, action_space=self.action_space
+                )
                 if self._cache_residual_inputs:
                     inputs = torch.cat((features, action_sequences.flatten(start_dim=1)), dim=-1)
                     if feedback is not None:
@@ -436,13 +454,11 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
                     for correction_sequence, env_id in zip(corrections, needs_trajectory):
                         self._correction_queues[env_id].extend(correction_sequence)
             if exporting:
-                # Preserve fixed standing commands and continuous grippers for downstream corrections.
-                assert action_sequences.dtype == torch.float32 and action_sequences.shape[-1] == 23
-                action_chunk = self._assemble_action(action_sequences)
-                action_chunk = torch.cat([action_sequences[..., :2], action_chunk[..., 2:]], dim=-1)
+                assert action_sequences.dtype == torch.float32
+                action_chunk = self._export_action_chunk(action_sequences)
                 annotate.output_tensors(
                     graph_name,
-                    [TensorSemantics("action", action_chunk, kind="command/g1_wbc_pink_action", element_names=_ACTION_ELEMENT_NAMES)],
+                    [TensorSemantics("action", action_chunk, kind=self.action_kind, element_names=self.action_element_names)],
                     export_with="onnx",
                 )
                 leapp.stop()
@@ -484,7 +500,7 @@ class RobomimicStandPolicy(PolicyBase[RobomimicStandPolicyCfg]):
         assembled = self._assemble_action(dp_actions)
         if self._native_feedback is not None:
             self._native_feedback.prepare_step(assembled[:, :2], global_tick=self._feedback_tick)
-        return assembled  # (num_envs, 23)
+        return assembled
 
     @staticmethod
     def _native_joint_state(env: gym.Env) -> tuple[list[str], torch.Tensor]:

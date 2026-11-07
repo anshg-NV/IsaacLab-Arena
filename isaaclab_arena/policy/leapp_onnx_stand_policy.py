@@ -17,25 +17,29 @@ import torch
 from isaaclab_arena.assets.register import register_policy
 from isaaclab_arena.policy.deployment_timing import DeploymentTiming, TIMING_PROFILES
 from isaaclab_arena.policy.policy_base import PolicyBase, PolicyCfg
+from isaaclab_arena_g1.g1_env.g1_arm_joints import joint_action_to_wbc
 
 
-_OBS_SHAPES = {
+_LOW_DIM_OBS_SHAPES = {
     "left_eef_pos": (3,),
     "left_eef_quat": (4,),
     "left_wrist_pose_pelvis_frame": (4, 4),
     "right_eef_pos": (3,),
     "right_eef_quat": (4,),
     "right_wrist_pose_pelvis_frame": (4, 4),
-    "robot_head_cam_rgb": (240, 320, 3),
+    "robot_joint_pos": (43,),
+    "left_arm_joint_pos": (7,),
+    "right_arm_joint_pos": (7,),
 }
 
 
 @dataclass
 class LeappOnnxStandPolicyCfg(PolicyCfg):
-    """Configuration for an eight-input graph or explicit causal20 extension."""
+    """Configuration for an end-effector or joint-action graph, optionally with causal20 feedback."""
 
     onnx_model_path: str
     device: str = "cuda:0"
+    base_height: float = 0.72
     timing_profile: str = "instant"
     feedback_contract_path: str | None = None
     feedback_contract_sha256: str | None = None
@@ -64,7 +68,7 @@ def _feedback_contract(config: LeappOnnxStandPolicyCfg) -> dict | None:
 
 @register_policy
 class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
-    """Consume exported standing action chunks and threshold grippers before execution."""
+    """Consume corrected action chunks, then expand grippers and simulator joint commands."""
 
     name = "leapp_onnx_stand"
 
@@ -113,21 +117,48 @@ class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
         assert self._session.get_providers()[0] == "CUDAExecutionProvider", "CUDA session silently fell back to CPU"
         self._session.disable_fallback()
         inputs = {item.name: item for item in self._session.get_inputs()}
-        expected_inputs = set(_OBS_SHAPES) | {"diffusion_noise"}
-        if self._feedback_contract is not None:
-            expected_inputs.add("residual_feedback")
-        assert set(inputs) == expected_inputs, "Unexpected full-graph input contract"
+        observation_inputs = set(inputs) - {"diffusion_noise", "residual_feedback"}
+        assert {"robot_head_cam_rgb", "diffusion_noise"} <= set(inputs), "Missing camera or diffusion input"
+        assert observation_inputs <= set(_LOW_DIM_OBS_SHAPES) | {
+            "robot_head_cam_rgb", "robot_head_cam_depth"
+        }, "Unknown graph observation"
+        assert ("residual_feedback" in inputs) == (self._feedback_contract is not None), "Feedback contract differs"
         if self._feedback_contract is not None:
             assert tuple(inputs["residual_feedback"].shape) == (1, 20)
             assert inputs["residual_feedback"].type == "tensor(float)"
-        for name, shape in _OBS_SHAPES.items():
+        camera_shape = tuple(inputs["robot_head_cam_rgb"].shape)
+        assert camera_shape in ((1, 2, 240, 320, 3), (1, 2, 480, 640, 3)), (
+            f"Expected a 320x240 or 640x480 RGB graph input, got {camera_shape}"
+        )
+        self._obs_shapes = {name: _LOW_DIM_OBS_SHAPES[name] for name in observation_inputs if name in _LOW_DIM_OBS_SHAPES}
+        self._obs_shapes["robot_head_cam_rgb"] = camera_shape[2:]
+        if "robot_head_cam_depth" in observation_inputs:
+            # The environment provides RGB-aligned, single-channel float32 depth/5.
+            self._obs_shapes["robot_head_cam_depth"] = (*camera_shape[2:4], 1)
+        for name, shape in self._obs_shapes.items():
             assert tuple(inputs[name].shape) == (1, 2, *shape), f"Unexpected input shape: {name}"
             expected_type = "tensor(uint8)" if name == "robot_head_cam_rgb" else "tensor(float)"
             assert inputs[name].type == expected_type, f"Unexpected input dtype: {name}"
-        assert tuple(inputs["diffusion_noise"].shape) == (1, 16, 21)
+        self._noise_shape = tuple(inputs["diffusion_noise"].shape)
+        assert len(self._noise_shape) == 3 and self._noise_shape[0] == 1
+        assert all(type(size) is int and size > 0 for size in self._noise_shape), "Expected static noise dimensions"
         assert inputs["diffusion_noise"].type == "tensor(float)"
         outputs = self._session.get_outputs()
-        assert len(outputs) == 1 and tuple(outputs[0].shape) == (1, 6, 23)
+        assert len(outputs) == 1
+        self._action_shape = tuple(outputs[0].shape)
+        assert len(self._action_shape) == 3 and self._action_shape[0] == 1
+        assert all(type(size) is int and size > 0 for size in self._action_shape), "Expected static action dimensions"
+        assert self._action_shape[-1] in (
+            23,
+            16,
+        ), "Expected 23-D EEF or raw 16-D joint actions; re-export older joint graphs"
+        self._joint_actions = self._action_shape[-1] == 16
+        assert self._noise_shape[-1] in ((16,) if self._joint_actions else (21, 23)), "Noise/action layout differs"
+        assert self._action_shape[1] + 1 <= self._noise_shape[1], "Action chunk exceeds the prediction horizon"
+        if self._feedback_contract is not None:
+            assert self._action_shape == (1, 6, 23) and self._noise_shape == (1, 16, 21), (
+                "Causal20 feedback requires the existing six-step end-effector contract"
+            )
         assert outputs[0].type == "tensor(float)"
         assert outputs[0].name == "action", "Runtime output differs from the action graph"
         self._output_name = outputs[0].name
@@ -142,9 +173,16 @@ class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
                 "graph_optimization": "BASIC", "runtime_fallback_disabled": True,
                 "cpu_shape_operator_placement_allowed": True,
             },
-            "input_contract": "Seven raw observations stacked twice plus fresh initial diffusion noise",
-            "output_contract": "Six 23-D actions with fixed standing commands; grippers thresholded after dequeue",
+            "input_contract": "Raw observations stacked twice plus fresh initial diffusion noise",
+            "action_space": "joint" if self._joint_actions else "eef",
+            "output_contract": (
+                "16-D absolute joint actions with continuous grippers; expanded to WBC commands after dequeue"
+                if self._joint_actions
+                else "23-D actions with fixed standing commands; grippers thresholded after dequeue"
+            ),
         }
+        if self._joint_actions:
+            self._provenance["base_height_m"] = config.base_height
         if self._feedback_contract is not None:
             self._provenance["input_contract"] += " plus one immutable causal20 packet at actual submission"
             self._provenance["feedback"] = {
@@ -160,21 +198,32 @@ class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
     def get_action(self, env, observation) -> torch.Tensor:
         """Return one final action, applying the selected causal timing approximation."""
         assert env.unwrapped.num_envs == 1, "Full-graph evaluation currently requires one environment"
+        assert env.unwrapped.action_manager.total_action_dim == (
+            50 if self._joint_actions else 23
+        ), "The environment's embodiment does not match the graph's action layout"
         assert self._pending_camera is None, "Previous action was not recorded as consumed"
         if self._native_feedback is not None:
             self._native_feedback._check(self._feedback_tick, "ready")
             assert not self._feedback_reset_ids, "Reset terminal scheduler slots before another action"
         policy_obs = observation.get("policy", observation)
-        camera = observation.get("camera_obs", {})["robot_head_cam_rgb"]
-        assert camera.dtype == torch.uint8 and tuple(camera.shape) == (1, 240, 320, 3)
+        camera_obs = observation.get("camera_obs", {})
+        camera = camera_obs["robot_head_cam_rgb"]
+        camera_shape = (1, *self._obs_shapes["robot_head_cam_rgb"])
+        assert camera.dtype == torch.uint8 and tuple(camera.shape) == camera_shape, (
+            f"Expected uint8 RGB matching ONNX input {camera_shape}, got {camera.dtype} {tuple(camera.shape)}"
+        )
         pixels = camera.float().flatten(start_dim=1)
         variance, mean = torch.var_mean(pixels, dim=1, correction=0)
         camera_stats = torch.stack((mean, variance.sqrt()), dim=-1)
         assert torch.isfinite(camera_stats).all() and (camera_stats > 2.0).all(), "Invalid or blank actor RGB frame"
-        obs = {key: policy_obs[key].clone().float() for key in _OBS_SHAPES if key != "robot_head_cam_rgb"}
-        obs["robot_head_cam_rgb"] = camera.clone()
+        obs = {
+            key: policy_obs[key].clone().float() if key in _LOW_DIM_OBS_SHAPES else camera_obs[key].clone()
+            for key in self._obs_shapes
+        }
         for key, value in obs.items():
-            assert tuple(value.shape) == (1, *_OBS_SHAPES[key]), f"Unexpected raw observation shape: {key}"
+            assert tuple(value.shape) == (1, *self._obs_shapes[key]), f"Unexpected raw observation shape: {key}"
+            expected_dtype = torch.uint8 if key == "robot_head_cam_rgb" else torch.float32
+            assert value.dtype == expected_dtype, f"Unexpected raw observation dtype: {key}"
             assert torch.isfinite(value).all(), f"Nonfinite raw observation: {key}"
         if self.config.timing_profile != "instant":
             if self._timing is None:
@@ -209,9 +258,9 @@ class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
             if self._native_feedback is not None:
                 (packet,) = self._native_feedback.submission_packets([0], global_tick=self._feedback_tick)
                 feed["residual_feedback"] = np.array([packet.features], dtype=np.float32)
-            feed["diffusion_noise"] = torch.randn((1, 16, 21), device=env.unwrapped.device).cpu().numpy()
+            feed["diffusion_noise"] = torch.randn(self._noise_shape, device=env.unwrapped.device).cpu().numpy()
             output = self._session.run([self._output_name], feed)[0]
-            assert output.shape == (1, 6, 23) and output.dtype == np.float32 and np.isfinite(output).all()
+            assert output.shape == self._action_shape and output.dtype == np.float32 and np.isfinite(output).all()
             chunk = torch.from_numpy(output).to(device=env.unwrapped.device)[0]
             if self._timing is None or self._timing.submit(0, chunk, None, None):
                 self._queues[0].extend(chunk)
@@ -220,9 +269,13 @@ class LeappOnnxStandPolicy(PolicyBase[LeappOnnxStandPolicyCfg]):
         else:
             action = self._timing.consume(self._queues)
             self._timing.advance()
-        # Preserve continuous gripper values in queued actions; threshold only this command.
         action = action.clone()
-        action[:, :2] = torch.where(action[:, :2] < -0.25, -0.5, 0.0)
+        if self._joint_actions:
+            action = joint_action_to_wbc(
+                action, list(env.unwrapped.scene["robot"].data.joint_names), self.config.base_height
+            )
+        else:
+            action[:, :2] = torch.where(action[:, :2] < -0.25, -0.5, 0.0)
         if self._native_feedback is not None:
             self._native_feedback.prepare_step(action[:, :2], global_tick=self._feedback_tick)
         self._pending_camera = camera_stats.detach().cpu()

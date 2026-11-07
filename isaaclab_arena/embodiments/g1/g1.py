@@ -34,6 +34,7 @@ from isaaclab_arena.embodiments.common.arm_mode import ArmMode
 from isaaclab_arena.embodiments.embodiment_base import EmbodimentBase
 from isaaclab_arena.terms.events import reset_all_articulation_joints
 from isaaclab_arena.utils.pose import Pose
+from isaaclab_arena_g1.g1_env.g1_arm_joints import G1_LEFT_ARM_JOINT_NAMES, G1_RIGHT_ARM_JOINT_NAMES
 from isaaclab_arena_g1.g1_env.mdp import g1_events as g1_events_mdp
 from isaaclab_arena_g1.g1_env.mdp import g1_observations as g1_observations_mdp
 from isaaclab_arena_g1.g1_env.mdp.actions.g1_decoupled_wbc_cumotion_action_cfg import G1DecoupledWBCCuMotionActionCfg
@@ -599,6 +600,14 @@ class G1WBCJointObservationsCfg:
         robot_joint_pos = ObsTerm(
             func=base_mdp.joint_pos,
             params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+        left_arm_joint_pos = ObsTerm(
+            func=base_mdp.joint_pos,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=list(G1_LEFT_ARM_JOINT_NAMES), preserve_order=True)},
+        )
+        right_arm_joint_pos = ObsTerm(
+            func=base_mdp.joint_pos,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=list(G1_RIGHT_ARM_JOINT_NAMES), preserve_order=True)},
         )
         robot_joint_vel = ObsTerm(
             func=base_mdp.joint_vel,

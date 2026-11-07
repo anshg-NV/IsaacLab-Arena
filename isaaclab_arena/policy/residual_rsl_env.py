@@ -31,6 +31,8 @@ from isaaclab_rl.rsl_rl import (
 
 from isaaclab_arena.policy.robomimic_stand_policy import RobomimicStandPolicy, RobomimicStandPolicyCfg
 from isaaclab_arena.policy.residual_observation import RESIDUAL_FEATURE_DIMS
+from isaaclab_arena.policy.residual_joint_policy import MAX_JOINT_DELTA, MAX_GRIPPER_DELTA, apply_joint_residual
+from isaaclab_arena.policy.robomimic_stand_joint_policy import RobomimicStandJointPolicy, RobomimicStandJointPolicyCfg
 from isaaclab_arena.policy.deployment_timing import TIMING_PROFILES
 from robomimic.models.residual_policy_nets import checkpoint_sha256, freeze_base
 from robomimic.models.feedback_residual_policy_nets import MODEL_TYPE, _configuration, _same_record, feedback_contract
@@ -138,12 +140,17 @@ class ResidualRslEnv(RslRlVecEnvWrapper):
     def __init__(self, env: gym.Env, clip_actions: float | None = None) -> None:
         assert clip_actions is None, "The residual uses tanh bounds, not clipped Gaussian actions"
         super().__init__(env, clip_actions=None)
-        assert self.num_actions == 23
+        assert self.num_actions in (23, 50), "Residuals require an EEF or joint G1 embodiment"
+        self.residual_action_space = "joint" if self.num_actions == 50 else "eef"
         assert self.cfg.is_finite_horizon
-        self.num_actions = 6
+        self.num_actions = 16 if self.residual_action_space == "joint" else 6
+        self.base_action_dim = 16 if self.residual_action_space == "joint" else 23
         self.residual_input_mode = getattr(self.cfg, "residual_input_mode", "vision")
-        self.residual_feature_dim = RESIDUAL_FEATURE_DIMS[self.residual_input_mode]
+        self.residual_feature_dim = (
+            None if self.residual_action_space == "joint" else RESIDUAL_FEATURE_DIMS[self.residual_input_mode]
+        )
         self.residual_feedback_enabled = getattr(self.cfg, "residual_feedback_enabled", None)
+        assert self.residual_action_space == "eef" or self.residual_feedback_enabled is None
         feedback_args = {}
         if self.residual_feedback_enabled is not None:
             assert type(self.residual_feedback_enabled) is bool
@@ -157,16 +164,26 @@ class ResidualRslEnv(RslRlVecEnvWrapper):
                 "feedback_availability_hypothesis": self.cfg.residual_feedback_availability_hypothesis,
                 "feedback_instance_id": str(Path(self.cfg.log_dir).resolve()) + "/native_training_policy",
             }
-        self.policy = RobomimicStandPolicy(RobomimicStandPolicyCfg(
-            robomimic_checkpoint=self.cfg.residual_base, device=self.device, cache_residual_inputs=True,
-            residual_input_mode=self.residual_input_mode,
-            timing_profile=getattr(self.cfg, "residual_timing_profile", "instant"),
-            variance_noise_seed=getattr(self.cfg, "residual_variance_noise_seed", None),
-            **feedback_args,
-        ))
+        policy_type, config_type = (
+            (RobomimicStandJointPolicy, RobomimicStandJointPolicyCfg)
+            if self.residual_action_space == "joint"
+            else (RobomimicStandPolicy, RobomimicStandPolicyCfg)
+        )
+        self.policy = policy_type(
+            config_type(
+                robomimic_checkpoint=self.cfg.residual_base,
+                device=self.device,
+                cache_residual_inputs=True,
+                residual_input_mode=self.residual_input_mode,
+                timing_profile=getattr(self.cfg, "residual_timing_profile", "instant"),
+                variance_noise_seed=getattr(self.cfg, "residual_variance_noise_seed", None),
+                **feedback_args,
+            )
+        )
         freeze_base(self.policy._policy.policy)
         self.policy.reset()
-        assert self.policy._policy.policy.algo_config.horizon.action_horizon == 6
+        self.residual_horizon = self.policy._policy.policy.algo_config.horizon.action_horizon
+        assert self.residual_action_space == "joint" or self.residual_horizon == 6
         self.raw_residual = torch.zeros((self.num_envs, self.num_actions), device=self.device)
         self.last_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.last_dropped = torch.zeros_like(self.last_success)
@@ -175,10 +192,26 @@ class ResidualRslEnv(RslRlVecEnvWrapper):
         self.previous_potential = self.potential()
         self.unwrapped._residual_adapter = self
         self._prepare(self.unwrapped.obs_buf)
+        residual_config = (
+            dict(
+                feature_dim=self.residual_feature_dim,
+                horizon=self.residual_horizon,
+                input_mode=self.residual_input_mode,
+                max_joint_delta=MAX_JOINT_DELTA,
+                max_gripper_delta=MAX_GRIPPER_DELTA,
+            )
+            if self.residual_action_space == "joint"
+            else dict(feature_dim=self.residual_feature_dim, horizon=6, max_translation=0.04)
+        )
+        initialization = getattr(self.cfg, "residual_actor_initialization", None)
+        if self.residual_action_space == "joint" and initialization is not None:
+            payload = torch.load(initialization["checkpoint"], map_location="cpu", weights_only=True)
+            assert payload["config"] == residual_config, "Actor initialization joint residual configuration mismatch"
         context = {
             "format_version": 1,
             "base_sha256": checkpoint_sha256(self.cfg.residual_base),
-            "config": {"feature_dim": self.residual_feature_dim, "horizon": 6, "max_translation": 0.04},
+            "config": residual_config,
+            "action_space": self.residual_action_space,
             "input_mode": self.residual_input_mode,
             "actor_initialization": getattr(self.cfg, "residual_actor_initialization", None),
             "timing_profile": self.policy.config.timing_profile,
@@ -236,9 +269,19 @@ class ResidualRslEnv(RslRlVecEnvWrapper):
         pixels = obs["camera_obs"]["robot_head_cam_rgb"].float().flatten(1)
         assert (pixels.mean(1) > 2).all() and (pixels.std(1) > 2).all(), "Invalid/black policy camera"
         self.base_action = self.policy.get_action(self.env, obs)
+        if self.residual_action_space == "joint":
+            # Keep the unthresholded action used to train gripper overrides.
+            self.base_action = self.policy.raw_action.clone()
         inputs = self.policy.residual_inputs
-        assert inputs.shape == (self.num_envs, self.residual_feature_dim + 6 * 23 +
-                                (20 if self.residual_feedback_enabled is not None else 0))
+        if self.residual_feature_dim is None:
+            self.residual_feature_dim = inputs.shape[-1] - self.residual_horizon * self.base_action_dim
+            assert self.residual_feature_dim > 0
+        assert inputs.shape == (
+            self.num_envs,
+            self.residual_feature_dim
+            + self.residual_horizon * self.base_action_dim
+            + (20 if self.residual_feedback_enabled is not None else 0),
+        )
         # Snapshot: a later chunk must not mutate the previous PPO observation.
         observations = {"policy": inputs.clone()}
         if self.residual_feedback_enabled is not None:
@@ -253,10 +296,14 @@ class ResidualRslEnv(RslRlVecEnvWrapper):
     def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
         assert actions.shape == (self.num_envs, self.num_actions) and torch.isfinite(actions).all()
         self.raw_residual = actions.to(self.device)
-        delta = 0.04 * self.raw_residual.tanh()
-        combined = self.base_action.clone()
-        combined[:, 2:5] += delta[:, :3]
-        combined[:, 9:12] += delta[:, 3:]
+        if self.residual_action_space == "joint":
+            corrected = apply_joint_residual(self.base_action, self.raw_residual)
+            combined = self.policy._assemble_action(corrected)
+        else:
+            delta = 0.04 * self.raw_residual.tanh()
+            combined = self.base_action.clone()
+            combined[:, 2:5] += delta[:, :3]
+            combined[:, 9:12] += delta[:, 3:]
         # Native auto-reset clears this buffer inside step; snapshot the finishing lengths first.
         episode_lengths = self.episode_length_buf.clone() + 1
         obs, rewards, terminated, truncated, extras = self.env.step(combined)
@@ -311,6 +358,10 @@ def environment_registration_callback() -> list[str]:
     assert task == "hubble_g1_static_pick_and_place", "Residual action/reward contract is specific to Hubble G1"
     spec = gym.spec(task)
     cfg = spec.kwargs["env_cfg_entry_point"]
+    from isaaclab_arena_g1.g1_env.mdp.actions.g1_decoupled_wbc_joint_action import G1DecoupledWBCJointAction
+
+    action_space = "joint" if cfg.actions.g1_action.class_type is G1DecoupledWBCJointAction else "eef"
+    assert action_space == "eef" or args.residual_feedback_mode is None, "Causal20 feedback requires EEF actions"
     cfg.residual_base = str(Path(args.residual_base).resolve(strict=True))
     cfg.residual_input_mode = args.residual_input_mode
     cfg.residual_timing_profile = args.residual_timing_profile
@@ -321,6 +372,7 @@ def environment_registration_callback() -> list[str]:
     cfg.is_finite_horizon = True
     cfg.terminations.time_out.time_out = True
     runner_cfg = ResidualRslRunnerCfg()
+    runner_cfg.actor.action_space = runner_cfg.critic.action_space = action_space
     assert (args.residual_actor_init_checkpoint is None) == (args.residual_actor_init_sha256 is None), (
         "Actor initialization requires both checkpoint and expected SHA-256"
     )

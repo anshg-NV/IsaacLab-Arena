@@ -48,7 +48,7 @@ class DeploymentTiming:
     def observe(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Sample-and-hold sensors before constructing the two-frame history."""
         for key, value in obs.items():
-            period = self.profile["camera_period" if key == "robot_head_cam_rgb" else "proprio_period"]
+            period = self.profile["camera_period" if key in ("robot_head_cam_rgb", "robot_head_cam_depth") else "proprio_period"]
             ids = [i for i, tick in enumerate(self.ticks) if tick % period == 0]
             if key not in self.sensor_cache:
                 self.sensor_cache[key] = value.clone()

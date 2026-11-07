@@ -8,8 +8,8 @@
 Structured to parallel :class:`isaaclab.envs.leapp_deployment_env.LeappDeploymentEnv`. Where that
 env bypasses all Isaac Lab managers and wires scene-entity data directly to the model via
 ``isaaclab_connection`` metadata, this env *keeps* the ObservationManager and the WBC action term:
-the G1 observations are transform/camera terms, and the 23-dim action must flow through the
-decoupled-WBC + PINK-IK action term, neither of which reduces to a direct scene read/write. Only
+the G1 observations are transform/camera terms, and actions must flow through the EEF or joint
+decoupled-WBC action term, neither of which reduces to a direct scene read/write. Only
 the neural policy is replaced by the LEAPP ``InferenceManager``.
 
 I/O wiring is resolved from the model's input/output names against the ObservationManager's term
@@ -40,6 +40,7 @@ except ImportError as e:
     raise ImportError("LEAPP package is required for policy deployment. Install with: pip install leapp") from e
 
 from isaaclab_arena.environments.isaaclab_arena_manager_based_env import IsaacLabArenaManagerBasedRLEnv
+from isaaclab_arena_g1.g1_env.g1_arm_joints import joint_action_to_wbc
 
 logger = logging.getLogger(__name__)
 
@@ -85,20 +86,22 @@ class RobomimicStandLeappDeploymentEnv:
 
     The environment self-configures ``num_envs`` and the frame-stack length from the exported
     model's input shapes, reads observations through the ObservationManager and frame-stacks them,
-    runs the LEAPP model, and applies the resulting 23-dim action through the WBC action term.
+    runs the LEAPP model, and converts its EEF or joint output into WBC commands.
     """
 
-    def __init__(self, cfg: Any, leapp_yaml_path: str):
+    def __init__(self, cfg: Any, leapp_yaml_path: str, base_height: float = 0.72):
         """Initialize the deployment environment.
 
         Args:
             cfg: A composed Arena ``ManagerBasedRLEnvCfg`` (e.g. from ``ArenaEnvBuilder``) with
                 non-concatenated observation terms and cameras enabled.
             leapp_yaml_path: Path to the LEAPP ``.yaml`` pipeline description.
+            base_height: Standing height for joint exports, which contain only arm and gripper commands.
         """
         self._is_closed = False
         self._leapp_yaml_path = leapp_yaml_path
         self._step_count = 0
+        self._base_height = base_height
 
         # ── LEAPP InferenceManager ────────────────────────────────
         self.inference = InferenceManager(leapp_yaml_path)
@@ -130,7 +133,7 @@ class RobomimicStandLeappDeploymentEnv:
         self._last_obs: dict[str, Any] = {}
 
         # ── Action-chunk replay ───────────────────────────────────
-        # The exported model returns a (num_envs, Ta, 23) chunk; serve one action per step and only
+        # The exported model returns an EEF (23-D) or joint (16-D) chunk; serve one action per step and only
         # re-run the diffusion model when the chunk is exhausted (so it runs once per Ta steps).
         self._action_chunk: torch.Tensor | None = None
         self._chunk_index: int = 0
@@ -230,7 +233,7 @@ class RobomimicStandLeappDeploymentEnv:
         return inputs
 
     def _write_outputs(self, outputs: dict[str, torch.Tensor]) -> torch.Tensor:
-        """Extract the assembled action chunk ``(num_envs, Ta, 23)`` from the model outputs.
+        """Extract the EEF or joint action chunk from the model outputs.
 
         Args:
             outputs: Model outputs keyed by ``"node_name/tensor_name"`` from ``run_policy()``.
@@ -278,11 +281,11 @@ class RobomimicStandLeappDeploymentEnv:
     def step(self) -> torch.Tensor:
         """Run one step: roll frame-stack -> (re-plan if the chunk is exhausted) -> apply action.
 
-        The exported model returns a ``(num_envs, Ta, 23)`` action chunk; one action is served per
+        The exported model returns a ``(num_envs, Ta, 23 or 16)`` action chunk; one action is served per
         step and the diffusion model is re-run only every ``Ta`` steps.
 
         Returns:
-            The action applied this step, shape ``(num_envs, 23)``.
+            The WBC action applied this step, shape ``(num_envs, 23 or 50)``.
         """
         self._step_count += 1
 
@@ -294,12 +297,18 @@ class RobomimicStandLeappDeploymentEnv:
             inputs = self._read_inputs()
             with torch.inference_mode():
                 outputs = self.inference.run_policy(inputs)
-            self._action_chunk = self._write_outputs(outputs)  # (num_envs, Ta, 23)
+            self._action_chunk = self._write_outputs(outputs)
             self._chunk_index = 0
 
         # 3. Serve one action from the chunk and apply it (WBC term + physics via env.step).
-        action = self._action_chunk[:, self._chunk_index].to(device=self.env.device)
+        action = self._action_chunk[:, self._chunk_index].to(device=self.env.device).clone()
         self._chunk_index += 1
+        if action.shape[-1] == 16:
+            assert self.env.action_manager.total_action_dim == 50, "Joint export requires a G1 WBC joint embodiment"
+            action = joint_action_to_wbc(action, list(self.env.scene["robot"].data.joint_names), self._base_height)
+        else:
+            assert action.shape[-1] == self.env.action_manager.total_action_dim == 23, "Expected an EEF or joint export"
+            action[:, :2] = torch.where(action[:, :2] < -0.25, -0.5, 0.0)
         obs, _, terminated, truncated, _ = self.env.step(action)
         self._last_obs = obs
 

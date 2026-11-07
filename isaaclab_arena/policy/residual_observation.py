@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 The Isaac Lab Arena Project Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Explicit observation contracts for visual and blind wrist residuals."""
+"""Observation contracts for visual and blind EEF or joint residuals."""
 
 import torch
 
@@ -17,22 +17,30 @@ BLIND_OBSERVATION_SHAPES = {
 RESIDUAL_FEATURE_DIMS = {"vision": 220, "blind": 92}
 
 
-def residual_features(algo, obs: dict[str, torch.Tensor], mode: str) -> torch.Tensor:
+def residual_features(algo, obs: dict[str, torch.Tensor], mode: str, *, action_space: str = "eef") -> torch.Tensor:
     """Return chunk-cached features; blind mode never reads RGB or an image encoder.
 
-    Blind features concatenate the six prepared wrist observations in the order above,
-    within each of the two chronological history frames. The frozen vision base's
+    Blind features concatenate prepared wrist observations (EEF) or arm angles (joint)
+    within each chronological history frame. The frozen vision base's
     action chunk is a separate input, so the combined policy is not camera-free.
     """
     assert mode in RESIDUAL_FEATURE_DIMS, f"Unsupported residual input mode: {mode}"
+    assert action_space in ("eef", "joint")
     if mode == "vision":
         from robomimic.models.residual_policy_nets import encode_residual_observation
 
         return encode_residual_observation(algo, obs)
     values = []
-    for key, shape in BLIND_OBSERVATION_SHAPES.items():
+    shapes = (
+        {"left_arm_joint_pos": (7,), "right_arm_joint_pos": (7,)}
+        if action_space == "joint"
+        else BLIND_OBSERVATION_SHAPES
+    )
+    for key, shape in shapes.items():
         value = obs[key]
-        assert value.shape[1] == 2 and tuple(value.shape[2:]) == shape, (key, value.shape)
+        assert tuple(value.shape[2:]) == shape, (key, value.shape)
+        if action_space == "eef":
+            assert value.shape[1] == 2, (key, value.shape)
         values.append(value.flatten(start_dim=2))
     return torch.cat(values, dim=-1).flatten(start_dim=1)
 
